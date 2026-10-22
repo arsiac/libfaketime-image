@@ -20,17 +20,26 @@ ARG APT_ARCHIVE
 # Releases that left the live mirrors still point at them in the base image, so
 # the sources list is rewritten before the first update. Live releases are left
 # alone: rewriting them would point apt at an archive that does not carry them.
+#
+# -updates and -backports are not archived for every release and a 404 on one of
+# those lines fails the whole update, so they are dropped. The archive is also
+# unsigned, which older apt refuses unless told to allow it.
 RUN set -eux; \
     if [ "${APT_ARCHIVE}" = "1" ]; then \
       sed -i \
         -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
         -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
+        -e '/-updates/d' \
+        -e '/-backports/d' \
         /etc/apt/sources.list; \
-      apt-get -o Acquire::Check-Valid-Until=false update; \
+      apt-get -o Acquire::Check-Valid-Until=false \
+              -o Acquire::AllowInsecureRepositories=true update; \
+      apt-get install -y --allow-unauthenticated --no-install-recommends \
+              build-essential ca-certificates curl; \
     else \
       apt-get update; \
+      apt-get install -y --no-install-recommends build-essential ca-certificates curl; \
     fi; \
-    apt-get install -y --no-install-recommends build-essential ca-certificates curl; \
     rm -rf /var/lib/apt/lists/*
 
 

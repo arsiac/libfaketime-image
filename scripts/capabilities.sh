@@ -58,6 +58,11 @@ for arg in "$@"; do
   esac
 done
 
+if ! command -v "$ENGINE" > /dev/null; then
+  echo "container engine '$ENGINE' is not installed (set CONTAINER_ENGINE)" >&2
+  exit 1
+fi
+
 if [ ${#images[@]} -eq 0 ]; then
   echo "usage: $0 <image> [image...] | --local" >&2
   exit 1
@@ -167,6 +172,10 @@ for img in "${images[@]}"; do
       *)    target="$t" ;;
     esac
     out=$(run_probe "$img" "$target") || true
+    if [ -z "$out" ]; then
+      echo "$short (${target:-self}): probe produced no output (engine: $ENGINE)" >&2
+      exit 1
+    fi
     get() {
       v="$(printf '%s\n' "$out" | sed -n "s/^$1=//p" | head -1)"
       [ -n "$v" ] || v=-

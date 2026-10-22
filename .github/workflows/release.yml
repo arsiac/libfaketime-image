@@ -288,6 +288,7 @@ jobs:
       - name: Compatibility matrix
         env:
           IMAGE: arsiachou/libfaketime
+          CONTAINER_ENGINE: docker
           VERSION: ${{ needs.resolve.outputs.version }}
           GLIBC: ${{ needs.resolve.outputs.glibc }}
           ARCH: ${{ matrix.arch }}
