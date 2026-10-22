@@ -196,6 +196,69 @@ jobs:
             CONTAINER_ENGINE=docker GLIBC_FLOOR="$GLIBC" ./test.sh "libfaketime:$built"
           fi
 
+      # Every carrier of one architecture is supposed to ship the identical
+      # file. Asserting it is what makes a single compatibility run cover all
+      # three carriers; without the check that would be an assumption.
+      - name: Assert every carrier ships the same library
+        if: steps.carriers.outputs.built != 'none'
+        run: |
+          set -eux
+          sums=""
+          for d in 11 12 13; do
+            if ! docker image inspect "libfaketime:$d" > /dev/null 2>&1; then continue; fi
+            cid="$(docker create "libfaketime:$d")"
+            s="$(docker cp "$cid:/usr/local/lib/faketime/libfaketime.so.1" - | sha256sum | cut -d' ' -f1)"
+            docker rm -v "$cid" > /dev/null
+            echo "carrier $d: $s"
+            sums="$sums $s"
+          done
+          count="$(printf '%s\n' $sums | sort -u | grep -c .)"
+          if [ "$count" != "1" ]; then
+            echo "carriers ship different libraries ($count distinct hashes)" >&2
+            exit 1
+          fi
+
+      # "How compatible is this build" means: the same library under each
+      # runtime glibc, on each architecture. Both arches run it and the assets
+      # job merges the rows, because a release's compatibility is not per-arch:
+      # the arch column is what distinguishes them.
+      - name: Compatibility matrix
+        if: steps.carriers.outputs.built != 'none'
+        env:
+          IMAGE: arsiachou/libfaketime
+          VERSION: ${{ needs.resolve.outputs.version }}
+          GLIBC: ${{ needs.resolve.outputs.glibc }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eux
+          # One row per carrier: the library is identical everywhere, but the
+          # glibc it runs on is not, so each image is its own environment. The
+          # local images are retagged to their published name first, so the
+          # table reads like the tags users actually pull.
+          refs=''
+          while IFS=$'\t' read -r distro carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+            if ! docker image inspect "libfaketime:$distro" > /dev/null 2>&1; then
+              echo "carrier $distro was already published; skipping its row"
+              continue
+            fi
+            point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+            ref="$IMAGE:v${VERSION}-glibc${GLIBC}-debian${point}"
+            docker tag "libfaketime:$distro" "$ref"
+            refs="$refs $ref"
+          done < docker/bases.lock
+
+          out="compat-$ARCH.md"
+          FORMAT=markdown ./scripts/capabilities.sh $refs > "$out"
+          {
+            echo "## Compatibility ($ARCH): libfaketime ${VERSION} (glibc ${GLIBC})"
+            echo
+            cat "$out"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # The assets job rebuilds the header, so only the data rows travel.
+          tail -n +3 "$out" > "compat-$ARCH.rows"
+
       - name: Package binary artifact
         if: steps.carriers.outputs.built != 'none'
         env:
@@ -223,7 +286,9 @@ jobs:
         if: steps.carriers.outputs.built != 'none'
         with:
           name: dist-${{ matrix.arch }}
-          path: libfaketime-*.tar.gz*
+          path: |
+            libfaketime-*.tar.gz*
+            compat-*.rows
           if-no-files-found: ignore
 
   merge:
@@ -314,13 +379,38 @@ jobs:
           pattern: dist-*
           merge-multiple: true
 
-      - run: |
+      # One table for the whole release: both architectures, every carrier. The
+      # per-arch jobs each ship their data rows, the header is assembled here so
+      # it can never disagree with what follows.
+      - name: Assemble the compatibility table
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          GLIBC: ${{ needs.resolve.outputs.glibc }}
+        run: |
+          set -eux
           mkdir -p dist
           ls -l dist
+
+          out="dist/libfaketime-${VERSION}-glibc${GLIBC}-compatibility.md"
+          if compgen -G "dist/compat-*.rows" > /dev/null; then
+            {
+              echo "## Compatibility: libfaketime ${VERSION} (glibc ${GLIBC})"
+              echo
+              echo '| image | arch | glibc | offset | freeze | anchor | sleep_ms | stat | touch |'
+              echo '|---|---|---|---|---|---|---|---|---|'
+              cat dist/compat-*.rows | sort
+            } > "$out"
+            rm -f dist/compat-*.rows
+            cat "$out"
+          else
+            echo "no compatibility rows were produced; nothing to publish"
+          fi
 
       - uses: softprops/action-gh-release@v2
         if: hashFiles('dist/libfaketime-*.tar.gz') != ''
         with:
-          files: dist/libfaketime-*.tar.gz*
+          files: |
+            dist/libfaketime-*.tar.gz*
+            dist/libfaketime-*-compatibility.md
           name: libfaketime ${{ needs.resolve.outputs.version }}
           generate_release_notes: true
