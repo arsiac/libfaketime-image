@@ -1,0 +1,78 @@
+name: CI
+
+# Build only, never push. Publishing belongs to release.yml.
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      # CI builds the newest release in the lock file; the version matrix is a
+      # release-time concern.
+      - name: Read pin
+        id: pin
+        run: |
+          row="$(awk -F'\t' '!/^#/ && NF { last = $0 } END { print last }' docker/versions.lock)"
+          {
+            echo "version=$(printf '%s' "$row" | cut -f1)"
+            echo "url=$(printf '%s' "$row" | cut -f2)"
+            echo "sha=$(printf '%s' "$row" | cut -f3)"
+            echo "cflags=$(printf '%s' "$row" | cut -f4)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read build baseline
+        id: base
+        run: |
+          row="$(awk -F'\t' '!/^#/ && NF { print }' docker/build-base.lock)"
+          {
+            echo "baseline=$(printf '%s' "$row" | cut -f1)"
+            echo "glibc=$(printf '%s' "$row" | cut -f2)"
+            echo "archived=$(printf '%s' "$row" | cut -f3)"
+          } >> "$GITHUB_OUTPUT"
+
+      # One compile, then one cheap final stage per carrier.
+      - name: Build carriers
+        env:
+          VERSION: ${{ steps.pin.outputs.version }}
+          URL: ${{ steps.pin.outputs.url }}
+          SHA: ${{ steps.pin.outputs.sha }}
+          CFLAGS_EXTRA: ${{ steps.pin.outputs.cflags }}
+          BASELINE: ${{ steps.base.outputs.baseline }}
+          GLIBC: ${{ steps.base.outputs.glibc }}
+          ARCHIVED: ${{ steps.base.outputs.archived }}
+        run: |
+          set -eux
+          while IFS=$'\t' read -r distro carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+            docker build \
+              --build-arg BASE_TAG="$BASELINE" \
+              --build-arg GLIBC="$GLIBC" \
+              --build-arg APT_ARCHIVE="$ARCHIVED" \
+              --build-arg FINAL_BASE="$carrier" \
+              --build-arg LIBFAKETIME_VERSION="$VERSION" \
+              --build-arg LIBFAKETIME_URL="$URL" \
+              --build-arg LIBFAKETIME_SHA256="$SHA" \
+              --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
+              --build-arg IMAGE_VERSION="v$VERSION-glibc$GLIBC-debian$distro" \
+              -t "libfaketime:$distro" .
+            echo "debian$distro -> $carrier resolved to $(docker run --rm "libfaketime:$distro" cat /etc/debian_version)"
+          done < docker/bases.lock
+
+      - name: Probe
+        env:
+          GLIBC_FLOOR: ${{ steps.base.outputs.glibc }}
+        run: CONTAINER_ENGINE=docker ./test.sh libfaketime:11

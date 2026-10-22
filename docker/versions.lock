@@ -1,0 +1,41 @@
+# libfaketime releases shipped by this repository.
+# Columns are tab separated:
+#   version   url   sha256   extra_cflags
+#
+# This repository packages upstream releases faithfully: one image per release,
+# built on one fixed ABI baseline. How a release behaves is a property of that
+# release, not a gate on this build. The matrix exists to make the differences
+# visible, not to hide them.
+#
+# Measured behaviour, for reference only (nothing enforces this):
+#
+#   version        11.11 (2.31)  12.15 (2.36)  13.7 (2.41)   file timestamps
+#   0.9.7 - 0.9.10  ok            ok            ok            not faked
+#   0.9.11, 0.9.12  hangs         ok            ok            faked
+#   0.9.13          ok            ok            ok            faked
+#
+# "hangs" means every preloaded process blocks during initialisation, and only
+# on glibc 2.31. The compiled artifact is sound; those releases simply do not
+# work on the bullseye target, which is worth knowing but is not our defect.
+# Releases up to 0.9.10 do not intercept statx(), so modern coreutils report
+# real file timestamps; that too is upstream behaviour.
+#
+# sha256 "TODO" means not pinned yet; the build refuses to run until
+# scripts/update-lock.sh has filled it in.
+#
+# extra_cflags is appended to the flags used by src/Makefile, which already
+# enables FAKE_PTHREAD, FAKE_STAT, FAKE_UTIME, FAKE_SLEEP, FAKE_TIMERS and
+# FAKE_INTERNAL_CALLS. Releases older than the current GCC warning set need
+# individual -Wno-error= entries here; nothing else should be added without a
+# reason recorded next to it. test.sh applies the preload per command rather
+# than exporting it, so FAKE_SLEEP does not distort its measurements.
+#
+# If a release tag is not published with a "v" prefix upstream, fix that row's
+# url; update-lock.sh will fail loudly on a 404.
+0.9.7	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.7.tar.gz	4d65f368b2d53ee2f93a25d5e9541ce27357f2b95e5e5afff210e0805042811e	-Wno-error=stringop-truncation -Wno-error=cast-function-type -Wno-error=format-truncation -Wno-error=stringop-overflow
+0.9.8	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.8.tar.gz	06288237cd5890eca148489e5b904ed852ed0ffa8424bfb479342f4daa8442a3	
+0.9.9	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.9.tar.gz	57d0181150361c0a9b5c8eef05b11392f6134ada2c2d998e92e63daed639647c	
+0.9.10	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.10.tar.gz	729ad33b9c750a50d9c68e97b90499680a74afd1568d859c574c0fe56fe7947f	
+0.9.11	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.11.tar.gz	5912d8b4179402058d3847c0ad389e688630ea38898847b1190e636e12c33e44	
+0.9.12	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.12.tar.gz	4fc32218697c052adcdc5ee395581f2554ca56d086ac817ced2be0d6f1f8a9fa	
+0.9.13	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.13.tar.gz	8e56deeb805682b025107e095f1d94a6ea677472f05824cd475f5c5e6e1a5ddf	

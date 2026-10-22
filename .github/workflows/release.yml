@@ -1,0 +1,326 @@
+name: Release
+
+# A tag publishes one libfaketime release across every carrier in
+# docker/bases.lock. The artifact is compiled once per architecture on the
+# single baseline in docker/build-base.lock, then copied into each carrier, so
+# the .so is byte-identical everywhere and only the base system differs.
+#
+# Each carrier publishes three levels of tag, the way language runtimes do:
+#   v0.9.13-glibc2.31-debian11.11   exact point release that was built against
+#   v0.9.13-glibc2.31-debian11      follows the 11.x line
+#   v0.9.13-glibc2.31               follows the carrier marked alias=1
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "libfaketime version, e.g. 0.9.13"
+        required: true
+      force:
+        description: "rebuild and overwrite already published tags"
+        type: boolean
+        default: false
+      dry_run:
+        description: "build and verify everything, push nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+      url: ${{ steps.pin.outputs.url }}
+      sha: ${{ steps.pin.outputs.sha }}
+      cflags: ${{ steps.pin.outputs.cflags }}
+      baseline: ${{ steps.base.outputs.baseline }}
+      glibc: ${{ steps.base.outputs.glibc }}
+      archived: ${{ steps.base.outputs.archived }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Derive version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          if [ -z "$version" ]; then
+            echo "could not derive a version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Read build baseline
+        id: base
+        run: |
+          row="$(awk -F'\t' '!/^#/ && NF { print }' docker/build-base.lock)"
+          {
+            echo "baseline=$(printf '%s' "$row" | cut -f1)"
+            echo "glibc=$(printf '%s' "$row" | cut -f2)"
+            echo "archived=$(printf '%s' "$row" | cut -f3)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read pin from docker/versions.lock
+        id: pin
+        run: |
+          version="${{ steps.ver.outputs.version }}"
+          row="$(awk -F'\t' -v v="$version" '!/^#/ && $1 == v { print; found = 1 } END { if (!found) exit 1 }' docker/versions.lock)" || {
+            echo "version $version is not listed in docker/versions.lock" >&2
+            exit 1
+          }
+          sha="$(printf '%s' "$row" | cut -f3)"
+          case "$sha" in
+            ""|TODO*)
+              echo "version $version is not pinned; run scripts/update-lock.sh $version" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$version"
+            echo "url=$(printf '%s' "$row" | cut -f2)"
+            echo "sha=$sha"
+            echo "cflags=$(printf '%s' "$row" | cut -f4)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build-${{ matrix.arch }}
+    needs: resolve
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # One compile, then one cheap final stage per carrier. The point release
+      # is read from the carrier image itself, never assumed, so the exact tag
+      # cannot disagree with what ends up inside.
+      - name: Build and push carriers
+        id: carriers
+        env:
+          IMAGE: arsiachou/libfaketime
+          VERSION: ${{ needs.resolve.outputs.version }}
+          URL: ${{ needs.resolve.outputs.url }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          CFLAGS_EXTRA: ${{ needs.resolve.outputs.cflags }}
+          BASELINE: ${{ needs.resolve.outputs.baseline }}
+          GLIBC: ${{ needs.resolve.outputs.glibc }}
+          ARCHIVED: ${{ needs.resolve.outputs.archived }}
+          ARCH: ${{ matrix.arch }}
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -eux
+          label() { docker image inspect "libfaketime:$1" --format "{{ index .Config.Labels \"$2\" }}"; }
+          check() {
+            actual="$(label "$1" "$2")"
+            if [ "$actual" != "$3" ]; then
+              echo "carrier $1: label $2 is '$actual', expected '$3'" >&2
+              exit 1
+            fi
+          }
+
+          pushed=0
+          while IFS=$'\t' read -r distro carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+
+            point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+            exact="v${VERSION}-glibc${GLIBC}-debian${point}"
+            major="v${VERSION}-glibc${GLIBC}-debian${distro}"
+
+            # The exact tag is the only one unique to this build; the other two
+            # move with upstream point releases, so existence is decided on it.
+            if [ "${FORCE:-false}" != "true" ] && docker manifest inspect "$IMAGE:$exact" > /dev/null 2>&1; then
+              echo "$IMAGE:$exact already published; skipping $distro"
+              continue
+            fi
+
+            docker build \
+              --build-arg BASE_TAG="$BASELINE" \
+              --build-arg GLIBC="$GLIBC" \
+              --build-arg APT_ARCHIVE="$ARCHIVED" \
+              --build-arg FINAL_BASE="$carrier" \
+              --build-arg LIBFAKETIME_VERSION="$VERSION" \
+              --build-arg LIBFAKETIME_URL="$URL" \
+              --build-arg LIBFAKETIME_SHA256="$SHA" \
+              --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
+              --build-arg IMAGE_VERSION="$exact" \
+              -t "libfaketime:$distro" .
+
+            check "$distro" org.opencontainers.image.version "$exact"
+            check "$distro" com.libfaketime.version "$VERSION"
+            check "$distro" com.libfaketime.source.sha256 "$SHA"
+            check "$distro" com.libfaketime.build.glibc "$GLIBC"
+            check "$distro" com.libfaketime.build.base "debian:$BASELINE"
+            check "$distro" com.libfaketime.runtime.base "debian:$carrier"
+
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "dry run: would push $IMAGE:$exact-$ARCH"
+            else
+              docker tag "libfaketime:$distro" "$IMAGE:$exact-$ARCH"
+              docker push "$IMAGE:$exact-$ARCH"
+            fi
+
+            echo "debian$distro: $carrier -> $point"
+            echo "- `$exact` / `$major` from $carrier ($point, $ARCH)" >> "$GITHUB_STEP_SUMMARY"
+            pushed=$((pushed + 1))
+          done < docker/bases.lock
+
+          echo "pushed $pushed carrier(s) for $ARCH"
+
+          # Re-running a finished release must stay green: when every carrier is
+          # already published nothing was built, so there is nothing to probe.
+          built=""
+          for d in 11 12 13; do
+            if docker image inspect "libfaketime:$d" > /dev/null 2>&1; then built="$d"; break; fi
+          done
+          echo "built=${built:-none}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$built" ]; then
+            # The library is identical in every carrier, so one probe covers all.
+            CONTAINER_ENGINE=docker GLIBC_FLOOR="$GLIBC" ./test.sh "libfaketime:$built"
+          fi
+
+      - name: Package binary artifact
+        if: steps.carriers.outputs.built != 'none'
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          GLIBC: ${{ needs.resolve.outputs.glibc }}
+          ARCH: ${{ matrix.arch }}
+          BUILT: ${{ steps.carriers.outputs.built }}
+        run: |
+          set -eux
+          name="libfaketime-${VERSION}-glibc${GLIBC}-${ARCH}"
+          # The archive mirrors the image layout, so it can be unpacked straight
+          # into / with tar -C / -xzf. Both directories must exist first: docker
+          # cp refuses a destination whose parent is missing, and without the
+          # trailing /. it would drop the faketime/ level.
+          mkdir -p "dist/$name/lib/faketime" "dist/$name/bin"
+          cid="$(docker create "libfaketime:$BUILT")"
+          docker cp "$cid:/usr/local/lib/faketime/." "dist/$name/lib/faketime"
+          docker cp "$cid:/usr/local/bin/faketime" "dist/$name/bin/faketime"
+          docker cp "$cid:/usr/src" "dist/$name/src"
+          docker rm -v "$cid" > /dev/null
+          tar -C dist -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.carriers.outputs.built != 'none'
+        with:
+          name: dist-${{ matrix.arch }}
+          path: libfaketime-*.tar.gz*
+          if-no-files-found: ignore
+
+  merge:
+    name: merge-debian${{ matrix.distro }}
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ["11", "12", "13"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create the tag hierarchy
+        env:
+          IMAGE: arsiachou/libfaketime
+          VERSION: ${{ needs.resolve.outputs.version }}
+          GLIBC: ${{ needs.resolve.outputs.glibc }}
+          DISTRO: ${{ matrix.distro }}
+          FORCE: ${{ inputs.force }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -eux
+          row="$(awk -F'\t' -v d="$DISTRO" '!/^#/ && $1 == d { print }' docker/bases.lock)"
+          carrier="$(printf '%s' "$row" | cut -f2)"
+          alias="$(printf '%s' "$row" | cut -f3)"
+          point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+
+          exact="v${VERSION}-glibc${GLIBC}-debian${point}"
+          major="v${VERSION}-glibc${GLIBC}-debian${DISTRO}"
+          short="v${VERSION}-glibc${GLIBC}"
+
+          create() {
+            docker buildx imagetools create -t "$IMAGE:$1" \
+              "$IMAGE:$exact-amd64" "$IMAGE:$exact-arm64"
+            platforms="$(docker buildx imagetools inspect "$IMAGE:$1" | grep -c 'Platform:')"
+            if [ "$platforms" -lt 2 ]; then
+              echo "expected 2 platforms in $1, found $platforms" >&2
+              exit 1
+            fi
+            echo "published $1"
+          }
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "dry run: would create $IMAGE:$exact, $IMAGE:$major"
+            if [ -n "$alias" ]; then echo "dry run: would create $IMAGE:$short"; fi
+            exit 0
+          fi
+
+          # The exact tag is a snapshot: once published it must never move, so
+          # a rebuild against a newer point release adds a tag instead of
+          # rewriting this one.
+          if [ "${FORCE:-false}" = "true" ] || ! docker manifest inspect "$IMAGE:$exact" > /dev/null 2>&1; then
+            create "$exact"
+          else
+            echo "$exact already published; leaving it alone"
+          fi
+
+          # The other two are pointers, not snapshots. When upstream ships 13.8,
+          # -debian13 and -glibc<abi> must follow it; skipping them because they
+          # already exist would strand every user on the previous point release.
+          create "$major"
+          # The short tag follows whichever carrier is marked alias=1, so the
+          # "newest stable" answer is declared in docker/bases.lock, not guessed.
+          if [ -n "$alias" ]; then
+            create "$short"
+          fi
+
+  assets:
+    name: publish-artifacts
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      # Nothing is downloaded when every carrier was already published, and that
+      # is not an error.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - run: |
+          mkdir -p dist
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        if: hashFiles('dist/libfaketime-*.tar.gz') != ''
+        with:
+          files: dist/libfaketime-*.tar.gz*
+          name: libfaketime ${{ needs.resolve.outputs.version }}
+          generate_release_notes: true
