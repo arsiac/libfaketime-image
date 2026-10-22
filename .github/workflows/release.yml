@@ -420,6 +420,9 @@ jobs:
     name: publish-artifacts
     needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     steps:
       # Nothing is downloaded when every carrier was already published, and that
       # is not an error.
