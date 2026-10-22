@@ -140,6 +140,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -174,6 +176,8 @@ jobs:
             fi
           }
 
+          digests="digests-$ARCH.txt"
+          : > "$digests"
           pushed=0
           while IFS=$'\t' read -r distro carrier _alias; do
             case "$distro" in ''|'#'*) continue ;; esac
@@ -191,25 +195,27 @@ jobs:
               # Reuse the published image so a rerun still packages release
               # assets; skipping the carrier would publish no files at all.
               echo "$IMAGE:$exact already published; reusing it for $distro"
-              docker pull "$IMAGE:${exact}-${ARCH}"
-              docker tag "$IMAGE:${exact}-${ARCH}" "libfaketime:$distro"
+              docker pull "$IMAGE:$exact"
+              docker tag "$IMAGE:$exact" "libfaketime:$distro"
               echo "- \`$exact\` / \`$major\` from $carrier (already published)" >> "$GITHUB_STEP_SUMMARY"
               continue
             fi
 
-            docker build \
-              --build-arg BASE_TAG="$BASELINE" \
-              --build-arg GLIBC="$GLIBC" \
-              --build-arg APT_ARCHIVE="$ARCHIVED" \
-              --build-arg FINAL_BASE="$carrier" \
-              --build-arg LIBFAKETIME_VERSION="$VERSION" \
-              --build-arg LIBFAKETIME_URL="$URL" \
-              --build-arg LIBFAKETIME_SHA256="$SHA" \
-              --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
-              --build-arg IMAGE_VERSION="$exact" \
-              --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
-              --build-arg RELEASE_TAG="${{ needs.resolve.outputs.tag }}" \
-              -t "libfaketime:$distro" .
+            # The local image is what gets tested, probed and packaged.
+            args=(
+              --build-arg "BASE_TAG=$BASELINE"
+              --build-arg "GLIBC=$GLIBC"
+              --build-arg "APT_ARCHIVE=$ARCHIVED"
+              --build-arg "FINAL_BASE=$carrier"
+              --build-arg "LIBFAKETIME_VERSION=$VERSION"
+              --build-arg "LIBFAKETIME_URL=$URL"
+              --build-arg "LIBFAKETIME_SHA256=$SHA"
+              --build-arg "EXTRA_CFLAGS=$CFLAGS_EXTRA"
+              --build-arg "IMAGE_VERSION=$exact"
+              --build-arg "VCS_REF=$(git rev-parse --short HEAD)"
+              --build-arg "RELEASE_TAG=${{ needs.resolve.outputs.tag }}"
+            )
+            docker buildx build "${args[@]}" --load -t "libfaketime:$distro" .
 
             check "$distro" org.opencontainers.image.version "$exact"
             check "$distro" com.libfaketime.version "$VERSION"
@@ -218,11 +224,22 @@ jobs:
             check "$distro" com.libfaketime.build.base "debian:$BASELINE"
             check "$distro" com.libfaketime.runtime.base "debian:$carrier"
 
+            # Push the single-platform manifest by digest. It has no tag, so no
+            # ...-amd64/...-arm64 image ever appears in the registry; the merge
+            # job assembles the multi-arch index from these digests.
             if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "dry run: would push $IMAGE:$exact-$ARCH"
+              echo "dry run: would push $distro as $IMAGE@<digest>"
             else
-              docker tag "libfaketime:$distro" "$IMAGE:$exact-$ARCH"
-              docker push "$IMAGE:$exact-$ARCH"
+              meta="meta-$distro.json"
+              docker buildx build "${args[@]}" \
+                --provenance=false --sbom=false \
+                --output "type=image,name=$IMAGE,push=true,push-by-digest=true,name-canonical=true" \
+                --metadata-file "$meta" .
+              digest="$(jq -r '."containerimage.digest"' "$meta")"
+              case "$digest" in
+                ""|null) echo "no digest returned for $distro" >&2; exit 1 ;;
+              esac
+              echo "$distro $digest" >> "$digests"
             fi
 
             echo "debian$distro: $carrier -> $point"
@@ -332,6 +349,12 @@ jobs:
             compat-*.rows
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: digests-*.txt
+          if-no-files-found: error
+
   merge:
     name: merge-debian${{ matrix.distro }}
     needs: [resolve, build]
@@ -342,6 +365,14 @@ jobs:
         distro: ${{ fromJSON(needs.resolve.outputs.carriers) }}
     steps:
       - uses: actions/checkout@v5
+
+      # The build jobs push single-platform manifests by digest; this is where
+      # those digests become a multi-arch tag.
+      - uses: actions/download-artifact@v4
+        with:
+          path: digests
+          pattern: digests-*
+          merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
 
@@ -374,9 +405,25 @@ jobs:
           major="v${VERSION}-glibc${GLIBC}-debian${DISTRO}"
           short="v${VERSION}-glibc${GLIBC}"
 
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            echo "dry run: would create $IMAGE:$exact, $IMAGE:$major"
+            if [ -n "$alias" ]; then echo "dry run: would create $IMAGE:$short"; fi
+            exit 0
+          fi
+
+          amd="$(awk -v d="$DISTRO" '$1 == d { print $2 }' digests/digests-amd64.txt)"
+          arm="$(awk -v d="$DISTRO" '$1 == d { print $2 }' digests/digests-arm64.txt)"
+          if [ -z "$amd" ] || [ -z "$arm" ]; then
+            # Nothing was rebuilt: read the per-arch digests out of the index
+            # that is already published.
+            raw="$(docker buildx imagetools inspect --raw "$IMAGE:$exact")"
+            amd="$(printf '%s' "$raw" | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest')"
+            arm="$(printf '%s' "$raw" | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest')"
+          fi
+
           create() {
             docker buildx imagetools create -t "$IMAGE:$1" \
-              "$IMAGE:$exact-amd64" "$IMAGE:$exact-arm64"
+              "$IMAGE@$amd" "$IMAGE@$arm"
             platforms="$(docker buildx imagetools inspect "$IMAGE:$1" | grep -c 'Platform:')"
             if [ "$platforms" -lt 2 ]; then
               echo "expected 2 platforms in $1, found $platforms" >&2
@@ -384,12 +431,6 @@ jobs:
             fi
             echo "published $1"
           }
-
-          if [ "${DRY_RUN:-false}" = "true" ]; then
-            echo "dry run: would create $IMAGE:$exact, $IMAGE:$major"
-            if [ -n "$alias" ]; then echo "dry run: would create $IMAGE:$short"; fi
-            exit 0
-          fi
 
           # The exact tag is a snapshot: once published it must never move, so
           # a rebuild against a newer point release adds a tag instead of
@@ -455,6 +496,7 @@ jobs:
           cat "$out"
 
       - uses: softprops/action-gh-release@v2
+        if: inputs.dry_run != true
         with:
           files: |
             dist/libfaketime-*.tar.gz*
