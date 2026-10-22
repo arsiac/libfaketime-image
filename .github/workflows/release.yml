@@ -34,29 +34,44 @@ jobs:
   resolve:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.pin.outputs.version }}
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
       url: ${{ steps.pin.outputs.url }}
       sha: ${{ steps.pin.outputs.sha }}
       cflags: ${{ steps.pin.outputs.cflags }}
       baseline: ${{ steps.base.outputs.baseline }}
       glibc: ${{ steps.base.outputs.glibc }}
       archived: ${{ steps.base.outputs.archived }}
+      carriers: ${{ steps.matrix.outputs.carriers }}
+      points: ${{ steps.points.outputs.map }}
     steps:
       - uses: actions/checkout@v5
 
+      # A git tag is <version> optionally followed by a release revision, e.g.
+      # v0.9.13, v0.9.13-20270101, v0.9.13-debian14. Upstream versions contain
+      # no hyphen, so the version is everything before the first one and the
+      # suffix only distinguishes releases that carry the same version.
       - name: Derive version
         id: ver
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ inputs.version }}"
+            tag="${{ inputs.version }}"
+            tag="v${tag#v}"          # accept both 0.9.13 and v0.9.13
           else
-            version="${GITHUB_REF_NAME#v}"
+            tag="${GITHUB_REF_NAME}"
           fi
-          if [ -z "$version" ]; then
-            echo "could not derive a version" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          version="${tag#v}"
+          version="${version%%-*}"
+          case "$version" in
+            *[!0-9.]*|"")
+              echo "cannot read a version out of tag '$tag'" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Read build baseline
         id: base
@@ -67,6 +82,31 @@ jobs:
             echo "glibc=$(printf '%s' "$row" | cut -f2)"
             echo "archived=$(printf '%s' "$row" | cut -f3)"
           } >> "$GITHUB_OUTPUT"
+
+      # The merge matrix is derived from docker/bases.lock, so adding a carrier
+      # there is enough: a hardcoded list here would silently never merge a new
+      # distro.
+      - name: Emit carrier matrix
+        id: matrix
+        run: |
+          list="$(awk -F'\t' '!/^#/ && NF { printf "\"%s\",", $1 }' docker/bases.lock | sed 's/,$//')"
+          echo "carriers=[$list]" >> "$GITHUB_OUTPUT"
+
+      # The carrier tags float on the newest point release, so it is resolved
+      # exactly once here and handed to both jobs. Resolving it again in the
+      # merge job would let a point release published mid-run produce a tag name
+      # the build never pushed.
+      - name: Resolve point releases
+        id: points
+        run: |
+          json="{"
+          while IFS=$'\t' read -r distro carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+            point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+            json="$json\"$distro\":\"$point\","
+          done < docker/bases.lock
+          json="${json%,}}"
+          echo "map=$json" >> "$GITHUB_OUTPUT"
 
       - name: Read pin from docker/versions.lock
         id: pin
@@ -84,7 +124,6 @@ jobs:
               ;;
           esac
           {
-            echo "version=$version"
             echo "url=$(printf '%s' "$row" | cut -f2)"
             echo "sha=$sha"
             echo "cflags=$(printf '%s' "$row" | cut -f4)"
@@ -124,6 +163,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
           FORCE: ${{ inputs.force }}
           DRY_RUN: ${{ inputs.dry_run }}
+          POINTS: ${{ needs.resolve.outputs.points }}
         run: |
           set -eux
           label() { docker image inspect "libfaketime:$1" --format "{{ index .Config.Labels \"$2\" }}"; }
@@ -139,7 +179,10 @@ jobs:
           while IFS=$'\t' read -r distro carrier _alias; do
             case "$distro" in ''|'#'*) continue ;; esac
 
-            point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+            point="$(printf '%s' "$POINTS" | jq -r --arg d "$distro" '.[$d]')"
+            case "$point" in
+              ""|null) echo "no point release resolved for $distro" >&2; exit 1 ;;
+            esac
             exact="v${VERSION}-glibc${GLIBC}-debian${point}"
             major="v${VERSION}-glibc${GLIBC}-debian${distro}"
 
@@ -160,6 +203,8 @@ jobs:
               --build-arg LIBFAKETIME_SHA256="$SHA" \
               --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
               --build-arg IMAGE_VERSION="$exact" \
+              --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
+              --build-arg RELEASE_TAG="${{ needs.resolve.outputs.tag }}" \
               -t "libfaketime:$distro" .
 
             check "$distro" org.opencontainers.image.version "$exact"
@@ -186,9 +231,10 @@ jobs:
           # Re-running a finished release must stay green: when every carrier is
           # already published nothing was built, so there is nothing to probe.
           built=""
-          for d in 11 12 13; do
-            if docker image inspect "libfaketime:$d" > /dev/null 2>&1; then built="$d"; break; fi
-          done
+          while IFS=$'\t' read -r distro _carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+            if docker image inspect "libfaketime:$distro" > /dev/null 2>&1; then built="$distro"; break; fi
+          done < docker/bases.lock
           echo "built=${built:-none}" >> "$GITHUB_OUTPUT"
 
           if [ -n "$built" ]; then
@@ -204,14 +250,15 @@ jobs:
         run: |
           set -eux
           sums=""
-          for d in 11 12 13; do
-            if ! docker image inspect "libfaketime:$d" > /dev/null 2>&1; then continue; fi
-            cid="$(docker create "libfaketime:$d")"
+          while IFS=$'\t' read -r distro _carrier _alias; do
+            case "$distro" in ''|'#'*) continue ;; esac
+            if ! docker image inspect "libfaketime:$distro" > /dev/null 2>&1; then continue; fi
+            cid="$(docker create "libfaketime:$distro")"
             s="$(docker cp "$cid:/usr/local/lib/faketime/libfaketime.so.1" - | sha256sum | cut -d' ' -f1)"
             docker rm -v "$cid" > /dev/null
-            echo "carrier $d: $s"
+            echo "carrier $distro: $s"
             sums="$sums $s"
-          done
+          done < docker/bases.lock
           count="$(printf '%s\n' $sums | sort -u | grep -c .)"
           if [ "$count" != "1" ]; then
             echo "carriers ship different libraries ($count distinct hashes)" >&2
@@ -242,7 +289,7 @@ jobs:
               echo "carrier $distro was already published; skipping its row"
               continue
             fi
-            point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+            point="$(printf '%s' "$POINTS" | jq -r --arg d "$distro" '.[$d]')"
             ref="$IMAGE:v${VERSION}-glibc${GLIBC}-debian${point}"
             docker tag "libfaketime:$distro" "$ref"
             refs="$refs $ref"
@@ -298,7 +345,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        distro: ["11", "12", "13"]
+        distro: ${{ fromJSON(needs.resolve.outputs.carriers) }}
     steps:
       - uses: actions/checkout@v5
 
@@ -318,12 +365,16 @@ jobs:
           DISTRO: ${{ matrix.distro }}
           FORCE: ${{ inputs.force }}
           DRY_RUN: ${{ inputs.dry_run }}
+          POINTS: ${{ needs.resolve.outputs.points }}
         run: |
           set -eux
           row="$(awk -F'\t' -v d="$DISTRO" '!/^#/ && $1 == d { print }' docker/bases.lock)"
           carrier="$(printf '%s' "$row" | cut -f2)"
           alias="$(printf '%s' "$row" | cut -f3)"
-          point="$(docker run --rm "debian:$carrier" cat /etc/debian_version)"
+          point="$(printf '%s' "$POINTS" | jq -r --arg d "$DISTRO" '.[$d]')"
+          case "$point" in
+            ""|null) echo "no point release resolved for $DISTRO" >&2; exit 1 ;;
+          esac
 
           exact="v${VERSION}-glibc${GLIBC}-debian${point}"
           major="v${VERSION}-glibc${GLIBC}-debian${DISTRO}"
@@ -412,5 +463,8 @@ jobs:
           files: |
             dist/libfaketime-*.tar.gz*
             dist/libfaketime-*-compatibility.md
-          name: libfaketime ${{ needs.resolve.outputs.version }}
+          # Without this a workflow_dispatch run would attach the release to the
+          # branch it was dispatched from instead of the intended tag.
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: libfaketime ${{ needs.resolve.outputs.tag }}
           generate_release_notes: true

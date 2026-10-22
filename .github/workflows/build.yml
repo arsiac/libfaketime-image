@@ -68,6 +68,8 @@ jobs:
               --build-arg LIBFAKETIME_SHA256="$SHA" \
               --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
               --build-arg IMAGE_VERSION="v$VERSION-glibc$GLIBC-debian$distro" \
+              --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
+              --build-arg RELEASE_TAG="ci-$(git rev-parse --short HEAD)" \
               -t "libfaketime:$distro" .
             echo "debian$distro -> $carrier resolved to $(docker run --rm "libfaketime:$distro" cat /etc/debian_version)"
           done < docker/bases.lock

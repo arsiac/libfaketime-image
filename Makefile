@@ -39,7 +39,9 @@ BUILD_ARGS := \
   --build-arg LIBFAKETIME_SHA256=$(LIBFAKETIME_SHA256) \
   --build-arg EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
   --build-arg INSTALL_PREFIX=$(PREFIX) \
-  --build-arg IMAGE_VERSION=$(TAG)
+  --build-arg IMAGE_VERSION=$(TAG) \
+  --build-arg VCS_REF=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
+  --build-arg RELEASE_TAG=$(shell git describe --tags --exact-match 2>/dev/null || echo local)
 
 .PHONY: build test push lock clean check-pin
 

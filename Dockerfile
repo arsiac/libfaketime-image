@@ -86,12 +86,16 @@ ARG LIBFAKETIME_SHA256
 ARG EXTRA_CFLAGS
 ARG INSTALL_PREFIX=/usr/local
 ARG IMAGE_VERSION
+ARG VCS_REF=""
+ARG RELEASE_TAG=""
 
 LABEL org.opencontainers.image.title="libfaketime" \
       org.opencontainers.image.description="upstream libfaketime ${LIBFAKETIME_VERSION} built once on glibc ${GLIBC} and carried on debian:${FINAL_BASE}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.licenses="GPL-2.0" \
       org.opencontainers.image.source="${LIBFAKETIME_URL}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      com.libfaketime.release="${RELEASE_TAG}" \
       com.libfaketime.version="${LIBFAKETIME_VERSION}" \
       com.libfaketime.source.url="${LIBFAKETIME_URL}" \
       com.libfaketime.source.sha256="${LIBFAKETIME_SHA256}" \
