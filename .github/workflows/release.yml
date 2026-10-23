@@ -67,7 +67,7 @@ jobs:
         id: bases
         run: |
           list="["
-          while IFS=$'\t' read -r image glibc archived; do
+          while IFS=$'\t' read -r image glibc archived make_mode; do
             case "$image" in ''|'#'*) continue ;; esac
             case "$glibc" in
               ''|*[!0-9.]*)
@@ -75,7 +75,11 @@ jobs:
                 exit 1
                 ;;
             esac
-            list="$list{\"image\":\"$image\",\"glibc\":\"$glibc\",\"archived\":\"$archived\"},"
+            if [ -z "$make_mode" ]; then
+              echo "baseline $image has no make value" >&2
+              exit 1
+            fi
+            list="$list{\"image\":\"$image\",\"glibc\":\"$glibc\",\"archived\":\"$archived\",\"make\":\"$make_mode\"},"
           done < docker/build-base.lock
           list="${list%,}]"
           if [ "$list" = "[]" ]; then
@@ -122,6 +126,7 @@ jobs:
               glibc="$(printf '%s' "$base" | jq -r '.glibc')"
               baseline="$(printf '%s' "$base" | jq -r '.image')"
               archived="$(printf '%s' "$base" | jq -r '.archived')"
+              make_mode="$(printf '%s' "$base" | jq -r '.make')"
               if lower_than "$carrier_glibc" "$glibc"; then
                 if [ -n "$alias" ]; then
                   echo "alias carrier $carrier (glibc $carrier_glibc) cannot carry baseline glibc $glibc" >&2
@@ -130,7 +135,7 @@ jobs:
                 echo "skip debian$distro ($carrier, glibc $carrier_glibc) for baseline glibc $glibc"
                 continue
               fi
-              pairs="$pairs{\"glibc\":\"$glibc\",\"baseline\":\"$baseline\",\"archived\":\"$archived\",\"distro\":\"$distro\",\"carrier\":\"$carrier\",\"point\":\"$point\",\"alias\":\"$alias\",\"carrier_glibc\":\"$carrier_glibc\"},"
+              pairs="$pairs{\"glibc\":\"$glibc\",\"baseline\":\"$baseline\",\"archived\":\"$archived\",\"make\":\"$make_mode\",\"distro\":\"$distro\",\"carrier\":\"$carrier\",\"point\":\"$point\",\"alias\":\"$alias\",\"carrier_glibc\":\"$carrier_glibc\"},"
             done < <(printf '%s' "$BASELINES" | jq -c '.[]')
           done < docker/bases.lock
           pairs="${pairs%,}]"
@@ -219,6 +224,7 @@ jobs:
             glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
             baseline="$(printf '%s' "$pair" | jq -r '.baseline')"
             archived="$(printf '%s' "$pair" | jq -r '.archived')"
+            make_mode="$(printf '%s' "$pair" | jq -r '.make')"
             distro="$(printf '%s' "$pair" | jq -r '.distro')"
             carrier="$(printf '%s' "$pair" | jq -r '.carrier')"
             point="$(printf '%s' "$pair" | jq -r '.point')"
@@ -242,6 +248,7 @@ jobs:
               --build-arg "BASE_TAG=$baseline"
               --build-arg "GLIBC=$glibc"
               --build-arg "APT_ARCHIVE=$archived"
+              --build-arg "TOOLCHAIN_MAKE=$make_mode"
               --build-arg "FINAL_BASE=$carrier"
               --build-arg "LIBFAKETIME_VERSION=$VERSION"
               --build-arg "LIBFAKETIME_URL=$URL"

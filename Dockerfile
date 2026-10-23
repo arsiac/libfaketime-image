@@ -6,6 +6,7 @@ ARG BASE_TAG=11-slim
 ARG GLIBC=2.31
 ARG APT_ARCHIVE=1
 ARG FINAL_BASE=11-slim
+ARG TOOLCHAIN_MAKE=system
 
 # Depends only on the baseline, so BuildKit reuses it across its carriers.
 FROM debian:${BASE_TAG} AS toolchain
@@ -14,6 +15,9 @@ FROM debian:${BASE_TAG} AS toolchain
 # RUN uses are re-declared here.
 ARG APT_ARCHIVE
 ARG GLIBC
+ARG TOOLCHAIN_MAKE
+ARG MAKE_VERSION=4.4.1
+ARG MAKE_SHA256=dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3
 
 # For archived releases: switch sources to archive.debian.org, drop
 # -updates/-backports (not always archived), and allow the unsigned archive.
@@ -41,9 +45,29 @@ RUN set -eux; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
+# Some baselines ship a make too old to parse libfaketime's Makefile; build the
+# pinned release with the system make and install only its binary.
+RUN set -eux; \
+    if [ "${TOOLCHAIN_MAKE}" = "system" ]; then \
+      make --version | head -1; \
+    else \
+      if [ "${TOOLCHAIN_MAKE}" != "${MAKE_VERSION}" ]; then \
+        echo "make ${TOOLCHAIN_MAKE} is not pinned in the Dockerfile" >&2; \
+        exit 1; \
+      fi; \
+      curl --retry 3 --retry-delay 2 -fsSL -o /tmp/make.tar.gz "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz"; \
+      echo "${MAKE_SHA256}  /tmp/make.tar.gz" | sha256sum -c -; \
+      mkdir -p /tmp/make; \
+      tar -xzf /tmp/make.tar.gz -C /tmp/make --strip-components=1; \
+      (cd /tmp/make && ./configure --prefix=/usr/local && make -j"$(nproc)" && make install-exec); \
+      rm -rf /tmp/make /tmp/make.tar.gz; \
+      /usr/local/bin/make --version | head -1 | grep -F "GNU Make ${TOOLCHAIN_MAKE}"; \
+    fi
+
 
 FROM toolchain AS build
 
+ARG TOOLCHAIN_MAKE
 ARG LIBFAKETIME_VERSION
 ARG LIBFAKETIME_URL
 ARG LIBFAKETIME_SHA256
@@ -68,15 +92,17 @@ WORKDIR /usr/src/libfaketime
 # dry run checks the extra flags reached the compile line.
 RUN set -eux; \
     export CFLAGS="${EXTRA_CFLAGS} -O2 -fPIC"; \
-    compile="$(make -C src -B -n)"; \
+    mk=make; \
+    if [ "${TOOLCHAIN_MAKE}" != "system" ]; then mk=/usr/local/bin/make; fi; \
+    compile="$("$mk" -C src -B -n)"; \
     for flag in ${EXTRA_CFLAGS}; do \
       case "$compile" in \
         *"$flag"*) ;; \
         *) echo "build dropped flag $flag" >&2; exit 1 ;; \
       esac; \
     done; \
-    make; \
-    make install DESTDIR=/stage PREFIX="${INSTALL_PREFIX}"; \
+    "$mk"; \
+    "$mk" install DESTDIR=/stage PREFIX="${INSTALL_PREFIX}"; \
     test -f "/stage${INSTALL_PREFIX}/lib/faketime/libfaketime.so.1"
 
 

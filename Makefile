@@ -10,10 +10,11 @@ ENGINE    ?= podman
 NETWORK   ?=
 
 # Baselines are keyed by glibc, so the tag always matches the compiled ABI.
-BUILD_ROW     := $(shell awk -F'\t' -v g="$(GLIBC)" '!/^#/ && $$2 == g {printf "%s|%s|%s", $$1, $$2, $$3}' docker/build-base.lock)
+BUILD_ROW     := $(shell awk -F'\t' -v g="$(GLIBC)" '!/^#/ && $$2 == g {printf "%s|%s|%s|%s", $$1, $$2, $$3, $$4}' docker/build-base.lock)
 BUILD_PARTS   := $(subst |, ,$(BUILD_ROW))
 BASE_TAG      := $(word 1,$(BUILD_PARTS))
 APT_ARCHIVE   := $(word 3,$(BUILD_PARTS))
+MAKE_MODE     := $(word 4,$(BUILD_PARTS))
 CARRIER_ROW   := $(shell awk -F'\t' -v d="$(DISTRO)" '!/^#/ && $$1 == d {printf "%s|%s", $$2, $$3}' docker/bases.lock)
 CARRIER_PARTS := $(subst |, ,$(CARRIER_ROW))
 FINAL_BASE    := $(word 1,$(CARRIER_PARTS))
@@ -35,6 +36,7 @@ BUILD_ARGS := \
   --build-arg BASE_TAG=$(BASE_TAG) \
   --build-arg GLIBC=$(GLIBC) \
   --build-arg APT_ARCHIVE=$(APT_ARCHIVE) \
+  --build-arg TOOLCHAIN_MAKE=$(MAKE_MODE) \
   --build-arg FINAL_BASE=$(FINAL_BASE) \
   --build-arg LIBFAKETIME_VERSION=$(VERSION) \
   --build-arg LIBFAKETIME_URL=$(LIBFAKETIME_URL) \
@@ -58,6 +60,10 @@ check-pin:
 check-base:
 	@test -n "$(BUILD_ROW)" || { \
 	  echo "no build baseline with glibc $(GLIBC) in docker/build-base.lock" >&2; \
+	  exit 1; \
+	}
+	@test -n "$(MAKE_MODE)" || { \
+	  echo "build baseline glibc $(GLIBC) has no make value" >&2; \
 	  exit 1; \
 	}
 	@test -n "$(FINAL_BASE)" || { \

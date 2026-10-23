@@ -1,8 +1,9 @@
 # The build baselines.
 # Columns are tab separated:
-#   image   glibc   archived
+#   image   glibc   archived   make
 #
 # glibc is the ABI floor the artifact is compiled against.
 # archived=1 means the release has left the live mirrors.
-10-slim	2.28	1
-11-slim	2.31	1
+# make is "system" or the version to build from source.
+10-slim	2.28	1	4.4.1
+11-slim	2.31	1	system
