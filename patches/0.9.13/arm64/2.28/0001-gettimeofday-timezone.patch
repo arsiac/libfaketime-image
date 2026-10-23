@@ -1,0 +1,12 @@
+--- a/src/libfaketime.c
++++ b/src/libfaketime.c
+@@ -3295,7 +3295,8 @@
+ #ifdef __ANDROID__
+ int gettimeofday(struct timeval *tv, struct timezone *tz)
+ #else
+-int gettimeofday(struct timeval *tv, void *tz)
++struct timezone;
++int gettimeofday(struct timeval *tv, struct timezone *tz)
+ #endif
+ #endif
+ {

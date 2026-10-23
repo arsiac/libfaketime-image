@@ -38,10 +38,10 @@ RUN set -eux; \
       apt-get -o Acquire::Check-Valid-Until=false \
               -o Acquire::AllowInsecureRepositories=true update; \
       apt-get install -y --allow-unauthenticated --no-install-recommends \
-              build-essential ca-certificates curl; \
+              build-essential ca-certificates curl patch; \
     else \
       apt-get update; \
-      apt-get install -y --no-install-recommends build-essential ca-certificates curl; \
+      apt-get install -y --no-install-recommends build-essential ca-certificates curl patch; \
     fi; \
     rm -rf /var/lib/apt/lists/*
 
@@ -68,6 +68,8 @@ RUN set -eux; \
 FROM toolchain AS build
 
 ARG TOOLCHAIN_MAKE
+ARG GLIBC
+ARG TARGETARCH
 ARG LIBFAKETIME_VERSION
 ARG LIBFAKETIME_URL
 ARG LIBFAKETIME_SHA256
@@ -87,6 +89,23 @@ RUN set -eux; \
     cp libfaketime.tar.gz "/usr/src/libfaketime-${LIBFAKETIME_VERSION}.tar.gz"
 
 WORKDIR /usr/src/libfaketime
+
+# Patches are keyed by version, architecture and glibc baseline; an absent or
+# empty directory leaves upstream's source untouched. TARGETARCH is the
+# builder's, so a classic builder would silently match nothing.
+COPY patches/ /tmp/patches/
+RUN set -eux; \
+    : "${TARGETARCH:?TARGETARCH is undefined; cannot resolve the patch directory}"; \
+    mkdir -p /usr/src/corresponding; \
+    cp "/usr/src/libfaketime-${LIBFAKETIME_VERSION}.tar.gz" /usr/src/corresponding/; \
+    dir="/tmp/patches/${LIBFAKETIME_VERSION}/${TARGETARCH}/${GLIBC}"; \
+    if [ -d "$dir" ]; then \
+      for p in "$dir"/*.patch; do \
+        [ -f "$p" ] || continue; \
+        patch -p1 --batch < "$p"; \
+        cp "$p" /usr/src/corresponding/; \
+      done; \
+    fi
 
 # Export CFLAGS so it cannot override upstream's own -DFAKE_* additions; the
 # dry run checks the extra flags reached the compile line.
@@ -136,11 +155,11 @@ LABEL org.opencontainers.image.title="libfaketime" \
       com.libfaketime.runtime.base="debian:${FINAL_BASE}" \
       com.libfaketime.install.prefix="${INSTALL_PREFIX}"
 
-# Installed tree, exactly as upstream's install target laid it down. Nothing is
-# added: this image carries the upstream release and nothing else.
+# Installed tree, exactly as upstream's install target laid it down.
 COPY --from=build /stage${INSTALL_PREFIX}/ ${INSTALL_PREFIX}/
-# Corresponding source for the GPL binary above.
-COPY --from=build /usr/src/libfaketime-${LIBFAKETIME_VERSION}.tar.gz /usr/src/
+# Corresponding source for the GPL binary above: the upstream release and, when
+# one was applied, the patch.
+COPY --from=build /usr/src/corresponding/ /usr/src/
 
 RUN set -eux; \
     chmod 0755 "${INSTALL_PREFIX}/lib/faketime/"*.so.1; \
