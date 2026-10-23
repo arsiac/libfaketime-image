@@ -52,7 +52,7 @@ jobs:
               echo "baseline $baseline has no make value" >&2
               exit 1
             fi
-            probe=""
+            refs=""
             while IFS=$'\t' read -r distro carrier carrier_glibc _alias; do
               case "$distro" in ''|'#'*) continue ;; esac
               case "$carrier_glibc" in ''|*[!0-9.]*)
@@ -89,12 +89,24 @@ jobs:
                 exit 1
               fi
               echo "baseline glibc $glibc, debian$distro -> $carrier resolved to $point (glibc $actual_glibc)"
-              if [ -z "$probe" ]; then probe="$tag"; fi
+              refs="$refs libfaketime:$tag"
             done < docker/bases.lock
 
-            if [ -z "$probe" ]; then
+            if [ -z "$refs" ]; then
               echo "no carrier can carry baseline glibc $glibc" >&2
               exit 1
             fi
-            CONTAINER_ENGINE=docker GLIBC_FLOOR="$glibc" ./test.sh "libfaketime:$probe"
+
+            # Every carrier of one baseline is measured: a tag that hangs on its
+            # own carrier is a release blocker, and the table says which one.
+            rc=0
+            table="$(CONTAINER_ENGINE=docker GLIBC_FLOOR="$glibc" ./scripts/capabilities.sh --gate $refs)" || rc=$?
+            printf '%s\n' "$table"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '### glibc %s\n\n%s\n\n' "$glibc" "$table" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ "$rc" -ne 0 ]; then
+              echo "glibc $glibc: at least one carrier failed (hang or error)" >&2
+              exit "$rc"
+            fi
           done < docker/build-base.lock

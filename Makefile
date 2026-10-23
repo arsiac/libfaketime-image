@@ -84,7 +84,7 @@ build: check-base
 	$(ENGINE) build $(BUILD_ARGS) -t $(IMAGE):$(TAG) .
 
 test: build
-	CONTAINER_ENGINE=$(ENGINE) GLIBC_FLOOR=$(GLIBC) ./test.sh $(IMAGE):$(TAG)
+	CONTAINER_ENGINE=$(ENGINE) GLIBC_FLOOR=$(GLIBC) ./scripts/capabilities.sh --gate $(IMAGE):$(TAG)
 
 push: check-pin build
 	$(ENGINE) push $(IMAGE):$(TAG)

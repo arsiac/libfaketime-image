@@ -47,6 +47,10 @@ below your target's glibc:
 New baselines are published as new `-glibc` tags and leave existing tags
 untouched.
 
+A tag only exists once its carrier passed verification. A missing `-debian<N>`
+tag means that version was not usable there; the short tag is only published
+when the newest carrier passed.
+
 ## License
 
 GNU General Public License, version 2 — see

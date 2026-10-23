@@ -192,9 +192,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # One compile per baseline, one cheap final stage per compatible carrier;
-      # the point release is read from the image.
-      - name: Build and push carriers
+      # One compile per baseline, one cheap final stage per compatible carrier.
+      # Nothing is published here; the gate decides after the measurement.
+      - name: Build carriers
         env:
           IMAGE: arsiachou/libfaketime
           VERSION: ${{ needs.resolve.outputs.version }}
@@ -205,7 +205,6 @@ jobs:
           PAIRS: ${{ needs.resolve.outputs.pairs }}
           ARCH: ${{ matrix.arch }}
           FORCE: ${{ inputs.force }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -eux
           label() { docker image inspect "libfaketime:$1" --format "{{ index .Config.Labels \"$2\" }}"; }
@@ -217,9 +216,8 @@ jobs:
             fi
           }
 
-          digests="digests-$ARCH.txt"
-          : > "$digests"
-          pushed=0
+          : > "reused-$ARCH.txt"
+          built=0
           while read -r pair; do
             glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
             baseline="$(printf '%s' "$pair" | jq -r '.baseline')"
@@ -239,7 +237,7 @@ jobs:
               echo "$IMAGE:$exact already published; reusing it for glibc$glibc debian$distro"
               docker pull "$IMAGE:$exact"
               docker tag "$IMAGE:$exact" "$local"
-              echo "- \`$exact\` / \`$major\` from $carrier (already published)" >> "$GITHUB_STEP_SUMMARY"
+              echo "$glibc $distro" >> "reused-$ARCH.txt"
               continue
             fi
 
@@ -267,67 +265,15 @@ jobs:
             check "$glibc-$distro" com.libfaketime.build.base "debian:$baseline"
             check "$glibc-$distro" com.libfaketime.runtime.base "debian:$carrier"
 
-            # Push each single-platform manifest by digest; no per-arch tag is published.
-            if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "dry run: would push glibc$glibc debian$distro as $IMAGE@<digest>"
-            else
-              meta="meta-$glibc-$distro.json"
-              docker buildx build "${args[@]}" \
-                --provenance=false --sbom=false \
-                --output "type=image,name=$IMAGE,push=true,push-by-digest=true,name-canonical=true" \
-                --metadata-file "$meta" .
-              digest="$(jq -r '."containerimage.digest"' "$meta")"
-              case "$digest" in
-                ""|null) echo "no digest returned for glibc$glibc debian$distro" >&2; exit 1 ;;
-              esac
-              echo "$glibc $distro $digest" >> "$digests"
-            fi
-
-            echo "baseline glibc $glibc, debian$distro: $carrier -> $point"
-            echo "- \`$exact\` / \`$major\` from $carrier ($point, $ARCH)" >> "$GITHUB_STEP_SUMMARY"
-            pushed=$((pushed + 1))
+            echo "built glibc$glibc debian$distro from $carrier ($point, $ARCH)"
+            built=$((built + 1))
           done < <(printf '%s' "$PAIRS" | jq -c '.[]')
 
-          echo "pushed $pushed carrier image(s) for $ARCH"
+          echo "built $built carrier image(s) for $ARCH"
 
-          # The library is identical within a baseline, so one probe per
-          # baseline covers its carriers.
-          while read -r glibc; do
-            ref="$(printf '%s' "$PAIRS" | jq -r --arg g "$glibc" '[.[] | select(.glibc == $g)][0] | "\(.glibc)-\(.distro)"')"
-            if ! docker image inspect "libfaketime:$ref" > /dev/null 2>&1; then
-              echo "no local image for baseline glibc $glibc ($ref)" >&2
-              exit 1
-            fi
-            CONTAINER_ENGINE=docker GLIBC_FLOOR="$glibc" ./test.sh "libfaketime:$ref"
-          done < <(printf '%s' "$PAIRS" | jq -r '[.[].glibc] | unique | .[]')
-
-      # Carriers of one baseline must ship the same library, or the single
-      # probe proves nothing.
-      - name: Assert each baseline ships the same library
-        env:
-          PAIRS: ${{ needs.resolve.outputs.pairs }}
-        run: |
-          set -eux
-          declare -A seen
-          while read -r pair; do
-            glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
-            distro="$(printf '%s' "$pair" | jq -r '.distro')"
-            image="libfaketime:$glibc-$distro"
-            docker image inspect "$image" > /dev/null
-            cid="$(docker create "$image")"
-            s="$(docker cp "$cid:/usr/local/lib/faketime/libfaketime.so.1" - | sha256sum | cut -d' ' -f1)"
-            docker rm -v "$cid" > /dev/null
-            echo "baseline glibc $glibc, carrier $distro: $s"
-            if [ -n "${seen[$glibc]:-}" ] && [ "${seen[$glibc]}" != "$s" ]; then
-              echo "carriers of baseline glibc $glibc ship different libraries" >&2
-              exit 1
-            fi
-            seen[$glibc]="$s"
-          done < <(printf '%s' "$PAIRS" | jq -c '.[]')
-
-      # Compatibility is measured per runtime glibc and architecture; the
-      # assets job merges both arches.
-      - name: Compatibility matrix
+      # Each carrier is measured on itself: the gate below is per tag, so a tag
+      # that hangs on its own base is refused without touching its siblings.
+      - name: Measure carriers
         env:
           IMAGE: arsiachou/libfaketime
           CONTAINER_ENGINE: docker
@@ -336,28 +282,117 @@ jobs:
           PAIRS: ${{ needs.resolve.outputs.pairs }}
         run: |
           set -eux
-          # One row per pair: same library, different runtime glibc. Retag
-          # local images to their published names first.
-          refs=''
+          rm -rf "compat-$ARCH"
+          mkdir -p "compat-$ARCH"
+          for glibc in $(printf '%s' "$PAIRS" | jq -r '[.[].glibc] | unique | .[]'); do
+            refs=''
+            while read -r distro point; do
+              ref="$IMAGE:v${VERSION}-glibc${glibc}-debian${point}"
+              docker tag "libfaketime:$glibc-$distro" "$ref"
+              refs="$refs $ref"
+            done < <(printf '%s' "$PAIRS" | jq -r --arg g "$glibc" '.[] | select(.glibc == $g) | "\(.distro) \(.point)"')
+
+            GLIBC_FLOOR="$glibc" JSON_OUT="compat-$ARCH/glibc-$glibc.json" \
+              ./scripts/capabilities.sh $refs > "compat-$ARCH/glibc-$glibc.md"
+
+            # Carriers of one baseline carry the same library, so a differing
+            # digest means the table is describing two different artifacts.
+            same="$(jq '[.[].sha] | unique | length' "compat-$ARCH/glibc-$glibc.json")"
+            if [ "$same" != "1" ]; then
+              echo "carriers of baseline glibc $glibc ship different libraries" >&2
+              exit 1
+            fi
+
+            {
+              echo "### Compatibility ($ARCH, glibc $glibc)"
+              echo
+              cat "compat-$ARCH/glibc-$glibc.md"
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          jq -s 'add' "compat-$ARCH"/*.json > "compat-$ARCH.json"
+
+      # Only carriers whose verdict is ok or degraded reach the registry; the
+      # merge job turns the digests into tags.
+      - name: Publish passing carriers
+        env:
+          IMAGE: arsiachou/libfaketime
+          VERSION: ${{ needs.resolve.outputs.version }}
+          URL: ${{ needs.resolve.outputs.url }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          CFLAGS_EXTRA: ${{ needs.resolve.outputs.cflags }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          PAIRS: ${{ needs.resolve.outputs.pairs }}
+          ARCH: ${{ matrix.arch }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -eux
+          status="status-$ARCH.txt"
+          : > "$status"
           while read -r pair; do
             glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
+            baseline="$(printf '%s' "$pair" | jq -r '.baseline')"
+            archived="$(printf '%s' "$pair" | jq -r '.archived')"
+            make_mode="$(printf '%s' "$pair" | jq -r '.make')"
             distro="$(printf '%s' "$pair" | jq -r '.distro')"
+            carrier="$(printf '%s' "$pair" | jq -r '.carrier')"
             point="$(printf '%s' "$pair" | jq -r '.point')"
-            ref="$IMAGE:v${VERSION}-glibc${glibc}-debian${point}"
-            docker tag "libfaketime:$glibc-$distro" "$ref"
-            refs="$refs $ref"
+
+            exact="v${VERSION}-glibc${glibc}-debian${point}"
+            major="v${VERSION}-glibc${glibc}-debian${distro}"
+            verdict="$(jq -r --arg t "$exact" '.[] | select(.tag == $t) | .verdict' "compat-$ARCH.json")"
+
+            case "$verdict" in
+              ok|degraded) ;;
+              *)
+                echo "$glibc $distro skip - $exact" >> "$status"
+                echo "- `$exact` / `$major` refused: $verdict" >> "$GITHUB_STEP_SUMMARY"
+                continue
+                ;;
+            esac
+
+            if grep -qx "$glibc $distro" "reused-$ARCH.txt"; then
+              echo "$glibc $distro pass - $exact" >> "$status"
+              echo "- `$exact` / `$major` unchanged (already published)" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "$glibc $distro pass - $exact" >> "$status"
+              echo "- `$exact` / `$major` would be published ($verdict)" >> "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+
+            args=(
+              --build-arg "BASE_TAG=$baseline"
+              --build-arg "GLIBC=$glibc"
+              --build-arg "APT_ARCHIVE=$archived"
+              --build-arg "TOOLCHAIN_MAKE=$make_mode"
+              --build-arg "FINAL_BASE=$carrier"
+              --build-arg "LIBFAKETIME_VERSION=$VERSION"
+              --build-arg "LIBFAKETIME_URL=$URL"
+              --build-arg "LIBFAKETIME_SHA256=$SHA"
+              --build-arg "EXTRA_CFLAGS=$CFLAGS_EXTRA"
+              --build-arg "IMAGE_VERSION=$exact"
+              --build-arg "VCS_REF=$(git rev-parse --short HEAD)"
+              --build-arg "RELEASE_TAG=$RELEASE_TAG"
+            )
+            meta="meta-$glibc-$distro.json"
+            docker buildx build "${args[@]}" \
+              --provenance=false --sbom=false \
+              --output "type=image,name=$IMAGE,push=true,push-by-digest=true,name-canonical=true" \
+              --metadata-file "$meta" .
+            digest="$(jq -r '."containerimage.digest"' "$meta")"
+            case "$digest" in
+              ""|null) echo "no digest returned for glibc$glibc debian$distro" >&2; exit 1 ;;
+            esac
+            echo "$glibc $distro pass $digest $exact" >> "$status"
+            echo "- `$exact` / `$major` published ($verdict)" >> "$GITHUB_STEP_SUMMARY"
           done < <(printf '%s' "$PAIRS" | jq -c '.[]')
 
-          out="compat-$ARCH.md"
-          FORMAT=markdown ./scripts/capabilities.sh $refs > "$out"
-          {
-            echo "## Compatibility ($ARCH): libfaketime ${VERSION}"
-            echo
-            cat "$out"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # The assets job rebuilds the header, so only the data rows travel.
-          tail -n +3 "$out" > "compat-$ARCH.rows"
+          echo "status for $ARCH:"
+          cat "$status"
 
       - name: Package binary artifacts
         env:
@@ -366,37 +401,49 @@ jobs:
           PAIRS: ${{ needs.resolve.outputs.pairs }}
         run: |
           set -eux
-          while read -r glibc; do
-            # Prefer the alias carrier so the archive matches the short tag. The
-            # archive mirrors /, so it unpacks with tar -C /; docker cp needs the
-            # parent directories and the trailing /.
-            image="$(printf '%s' "$PAIRS" | jq -r --arg g "$glibc" '
-              (([.[] | select(.glibc == $g and .alias == "1")][0]) //
-               ([.[] | select(.glibc == $g)][0])) |
-              "\(.glibc)-\(.distro)"')"
+          # A refused carrier has no published tag, so it has nothing to ship.
+          awk '$3 == "pass" { print $1, $2 }' "status-$ARCH.txt" | sort -uV > "passing-$ARCH.txt"
+          if [ ! -s "passing-$ARCH.txt" ]; then
+            echo "no carrier passed for $ARCH; nothing to package"
+            exit 0
+          fi
+
+          for glibc in $(awk '{ print $1 }' "passing-$ARCH.txt" | sort -uV); do
+            # Prefer the alias carrier so the archive matches the short tag, but
+            # only when that carrier is one of the passing ones.
+            distro="$(printf '%s' "$PAIRS" | jq -r --arg g "$glibc" '
+              [ .[] | select(.glibc == $g) ] |
+              (([.[] | select(.alias == "1")][0]) // .[0]) | .distro')"
+            if ! awk -v g="$glibc" -v d="$distro" '$1 == g && $2 == d { found = 1 } END { exit !found }' "passing-$ARCH.txt"; then
+              distro="$(awk -v g="$glibc" '$1 == g { print $2; exit }' "passing-$ARCH.txt")"
+            fi
+
+            # The archive mirrors /, so it unpacks with tar -C /; docker cp
+            # needs the parent directories and the trailing /.
+            image="libfaketime:$glibc-$distro"
             name="libfaketime-${VERSION}-glibc${glibc}-${ARCH}"
             mkdir -p "dist/$name/lib/faketime" "dist/$name/bin"
-            cid="$(docker create "libfaketime:$image")"
+            cid="$(docker create "$image")"
             docker cp "$cid:/usr/local/lib/faketime/." "dist/$name/lib/faketime"
             docker cp "$cid:/usr/local/bin/faketime" "dist/$name/bin/faketime"
             docker cp "$cid:/usr/src" "dist/$name/src"
             docker rm -v "$cid" > /dev/null
             tar -C dist -czf "$name.tar.gz" "$name"
             sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          done < <(printf '%s' "$PAIRS" | jq -r '[.[].glibc] | unique | .[]')
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.arch }}
-          path: |
-            libfaketime-*.tar.gz*
-            compat-*.rows
-          if-no-files-found: error
+          path: libfaketime-*.tar.gz*
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.arch }}
-          path: digests-*.txt
+          name: gate-${{ matrix.arch }}
+          path: |
+            compat-${{ matrix.arch }}.json
+            status-${{ matrix.arch }}.txt
           if-no-files-found: error
 
   merge:
@@ -410,11 +457,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Turn the per-arch digests into a multi-arch tag.
+      # The gate decided which carriers may exist; the digests come with it.
       - uses: actions/download-artifact@v4
         with:
-          path: digests
-          pattern: digests-*
+          path: gate
+          pattern: gate-*
           merge-multiple: true
 
       - uses: docker/setup-buildx-action@v3
@@ -445,15 +492,32 @@ jobs:
           major="v${VERSION}-glibc${GLIBC}-debian${DISTRO}"
           short="v${VERSION}-glibc${GLIBC}"
 
+          # A tag is multi-arch, so one refused architecture refuses the pair.
+          state_of() {
+            awk -v g="$GLIBC" -v d="$DISTRO" '$1 == g && $2 == d { print $3 }' "gate/status-$1.txt" 2>/dev/null
+          }
+          digest_of() {
+            awk -v g="$GLIBC" -v d="$DISTRO" '$1 == g && $2 == d { print $4 }' "gate/status-$1.txt" 2>/dev/null
+          }
+
+          amd_state="$(state_of amd64)"
+          arm_state="$(state_of arm64)"
+          if [ "$amd_state" != pass ] || [ "$arm_state" != pass ]; then
+            echo "glibc $GLIBC debian$DISTRO stays unpublished: amd64=${amd_state:-missing} arm64=${arm_state:-missing}"
+            echo "- glibc $GLIBC debian$DISTRO skipped (amd64 ${amd_state:-missing}, arm64 ${arm_state:-missing})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           if [ "${DRY_RUN:-false}" = "true" ]; then
             echo "dry run: would create $IMAGE:$exact, $IMAGE:$major"
             if [ -n "$ALIAS" ]; then echo "dry run: would create $IMAGE:$short"; fi
             exit 0
           fi
 
-          amd="$(awk -v g="$GLIBC" -v d="$DISTRO" '$1 == g && $2 == d { print $3 }' digests/digests-amd64.txt)"
-          arm="$(awk -v g="$GLIBC" -v d="$DISTRO" '$1 == g && $2 == d { print $3 }' digests/digests-arm64.txt)"
-          if [ -z "$amd" ] || [ -z "$arm" ]; then
+          amd="$(digest_of amd64)"
+          arm="$(digest_of arm64)"
+          # A reused image was not pushed again, so its digest is read back.
+          if [ -z "$amd" ] || [ "$amd" = "-" ] || [ -z "$arm" ] || [ "$arm" = "-" ]; then
             # Nothing was rebuilt: read the digests from the published index.
             raw="$(docker buildx imagetools inspect --raw "$IMAGE:$exact")"
             amd="$(printf '%s' "$raw" | jq -r '.manifests[] | select(.platform.architecture == "amd64") | .digest')"
@@ -493,36 +557,59 @@ jobs:
       contents: write
       actions: read
     steps:
-      # Every arch must upload assets; a missing one fails the release.
+      - uses: actions/checkout@v5
+
+      # A release where nothing passed publishes the report alone, so the
+      # archive download may legitimately have nothing to fetch.
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: dist
           pattern: dist-*
           merge-multiple: true
 
-      # One compatibility table for both architectures, header assembled here.
+      - uses: actions/download-artifact@v4
+        with:
+          path: gate
+          pattern: gate-*
+          merge-multiple: true
+
+      # The report is rebuilt from the measured rows, so the published decision
+      # and the table come from the same data.
       - name: Assemble the compatibility table
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -eux
           mkdir -p dist
-          ls -l dist
+          for arch in amd64 arm64; do
+            test -f "gate/compat-$arch.json"
+            test -f "gate/status-$arch.txt"
+          done
 
-          if ! compgen -G "dist/compat-*.rows" > /dev/null; then
-            echo "no compatibility rows were produced" >&2
-            exit 1
-          fi
+          jq -s 'add' gate/compat-amd64.json gate/compat-arm64.json > dist/rows.json
+
+          # A tag is multi-arch, so it counts as published only if both
+          # architectures passed it.
+          amd_pass="$(awk '$3 == "pass" { print $5 }' gate/status-amd64.txt | sort)"
+          arm_pass="$(awk '$3 == "pass" { print $5 }' gate/status-arm64.txt | sort)"
+          published="$(comm -12 <(printf '%s\n' "$amd_pass") <(printf '%s\n' "$arm_pass") | grep -v '^$' || true)"
+          total="$(jq -r '[.[].tag] | unique | length' dist/rows.json)"
+          count="$(printf '%s\n' "$published" | grep -c . || true)"
+
+          jq --arg tags "$published" '
+            ($tags | split("\n") | map(select(length > 0))) as $p
+            | map(. as $row | . + {pushed: (if ($p | index($row.tag)) then "yes" else "no" end)})
+          ' dist/rows.json | jq 'sort_by(.tag, .arch)' > dist/rows-marked.json
 
           out="dist/libfaketime-${VERSION}-compatibility.md"
           {
             echo "## Compatibility: libfaketime ${VERSION}"
             echo
-            echo '| image | arch | glibc | offset | freeze | anchor | sleep_ms | stat | touch |'
-            echo '|---|---|---|---|---|---|---|---|---|'
-            cat dist/compat-*.rows | sort
+            echo "${count} of ${total} tags published"
+            echo
+            ./scripts/capabilities.sh --render dist/rows-marked.json
           } > "$out"
-          rm -f dist/compat-*.rows
           cat "$out"
 
       - uses: softprops/action-gh-release@v2
