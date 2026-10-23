@@ -1,30 +1,29 @@
 # syntax=docker/dockerfile:1
 
-# The artifact is compiled once on the oldest baseline supported
-# (docker/build-base.lock) and then copied into a carrier image
-# (docker/bases.lock). glibc compatibility only runs one way, so compiling on
-# the older ABI is what makes one artifact usable from Debian 11 through 13.
+# One artifact per baseline in docker/build-base.lock, copied into every
+# compatible carrier in docker/bases.lock.
 ARG BASE_TAG=11-slim
 ARG GLIBC=2.31
 ARG APT_ARCHIVE=1
 ARG FINAL_BASE=11-slim
 
-# The toolchain stage depends on the build baseline only, so it is identical
-# for every carrier and BuildKit reuses it across the three builds.
+# Depends only on the baseline, so BuildKit reuses it across its carriers.
 FROM debian:${BASE_TAG} AS toolchain
 
-# ARGs declared before the first FROM are not visible inside a stage; the
-# archived-mirror switch is used by the RUN below, so it is re-declared here.
+# ARGs declared before the first FROM are not visible in stages; the ones the
+# RUN uses are re-declared here.
 ARG APT_ARCHIVE
+ARG GLIBC
 
-# Releases that left the live mirrors still point at them in the base image, so
-# the sources list is rewritten before the first update. Live releases are left
-# alone: rewriting them would point apt at an archive that does not carry them.
-#
-# -updates and -backports are not archived for every release and a 404 on one of
-# those lines fails the whole update, so they are dropped. The archive is also
-# unsigned, which older apt refuses unless told to allow it.
+# For archived releases: switch sources to archive.debian.org, drop
+# -updates/-backports (not always archived), and allow the unsigned archive.
+# The published glibc is asserted against the toolchain.
 RUN set -eux; \
+    libc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"; \
+    if [ "$libc" != "${GLIBC}" ]; then \
+      echo "toolchain reports glibc $libc, docker/build-base.lock says ${GLIBC}" >&2; \
+      exit 1; \
+    fi; \
     if [ "${APT_ARCHIVE}" = "1" ]; then \
       sed -i \
         -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
@@ -65,11 +64,8 @@ RUN set -eux; \
 
 WORKDIR /usr/src/libfaketime
 
-# CFLAGS is exported rather than passed on the command line: a command-line
-# assignment would override the upstream Makefile's own "-DFAKE_STAT ..."
-# additions, silently shipping a library that intercepts less than intended.
-# The dry run asserts the extra flags survive into the compile line instead of
-# being dropped by a hard assignment in some release.
+# Export CFLAGS so it cannot override upstream's own -DFAKE_* additions; the
+# dry run checks the extra flags reached the compile line.
 RUN set -eux; \
     export CFLAGS="${EXTRA_CFLAGS} -O2 -fPIC"; \
     compile="$(make -C src -B -n)"; \

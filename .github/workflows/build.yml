@@ -34,47 +34,62 @@ jobs:
             echo "cflags=$(printf '%s' "$row" | cut -f4)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Read build baseline
-        id: base
-        run: |
-          row="$(awk -F'\t' '!/^#/ && NF { print }' docker/build-base.lock)"
-          {
-            echo "baseline=$(printf '%s' "$row" | cut -f1)"
-            echo "glibc=$(printf '%s' "$row" | cut -f2)"
-            echo "archived=$(printf '%s' "$row" | cut -f3)"
-          } >> "$GITHUB_OUTPUT"
-
-      # One compile, then one cheap final stage per carrier.
+      # One compile per baseline; skip carriers below its glibc and verify the
+      # locked glibc against the image.
       - name: Build carriers
         env:
           VERSION: ${{ steps.pin.outputs.version }}
           URL: ${{ steps.pin.outputs.url }}
           SHA: ${{ steps.pin.outputs.sha }}
           CFLAGS_EXTRA: ${{ steps.pin.outputs.cflags }}
-          BASELINE: ${{ steps.base.outputs.baseline }}
-          GLIBC: ${{ steps.base.outputs.glibc }}
-          ARCHIVED: ${{ steps.base.outputs.archived }}
         run: |
           set -eux
-          while IFS=$'\t' read -r distro carrier _alias; do
-            case "$distro" in ''|'#'*) continue ;; esac
-            docker build \
-              --build-arg BASE_TAG="$BASELINE" \
-              --build-arg GLIBC="$GLIBC" \
-              --build-arg APT_ARCHIVE="$ARCHIVED" \
-              --build-arg FINAL_BASE="$carrier" \
-              --build-arg LIBFAKETIME_VERSION="$VERSION" \
-              --build-arg LIBFAKETIME_URL="$URL" \
-              --build-arg LIBFAKETIME_SHA256="$SHA" \
-              --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
-              --build-arg IMAGE_VERSION="v$VERSION-glibc$GLIBC-debian$distro" \
-              --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
-              --build-arg RELEASE_TAG="ci-$(git rev-parse --short HEAD)" \
-              -t "libfaketime:$distro" .
-            echo "debian$distro -> $carrier resolved to $(docker run --rm "libfaketime:$distro" cat /etc/debian_version)"
-          done < docker/bases.lock
+          lower_than() { [ "$1" != "$2" ] && [ "$1" = "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" ]; }
 
-      - name: Probe
-        env:
-          GLIBC_FLOOR: ${{ steps.base.outputs.glibc }}
-        run: CONTAINER_ENGINE=docker ./test.sh libfaketime:11
+          while IFS=$'\t' read -r baseline glibc archived; do
+            case "$baseline" in ''|'#'*) continue ;; esac
+            probe=""
+            while IFS=$'\t' read -r distro carrier carrier_glibc _alias; do
+              case "$distro" in ''|'#'*) continue ;; esac
+              case "$carrier_glibc" in ''|*[!0-9.]*)
+                echo "carrier for distro $distro has no glibc value" >&2
+                exit 1
+                ;;
+              esac
+              if lower_than "$carrier_glibc" "$glibc"; then
+                echo "skip debian$distro ($carrier, glibc $carrier_glibc) for baseline glibc $glibc"
+                continue
+              fi
+
+              tag="$glibc-$distro"
+              docker build \
+                --build-arg BASE_TAG="$baseline" \
+                --build-arg GLIBC="$glibc" \
+                --build-arg APT_ARCHIVE="$archived" \
+                --build-arg FINAL_BASE="$carrier" \
+                --build-arg LIBFAKETIME_VERSION="$VERSION" \
+                --build-arg LIBFAKETIME_URL="$URL" \
+                --build-arg LIBFAKETIME_SHA256="$SHA" \
+                --build-arg EXTRA_CFLAGS="$CFLAGS_EXTRA" \
+                --build-arg IMAGE_VERSION="v$VERSION-glibc$glibc-debian$distro" \
+                --build-arg VCS_REF="$(git rev-parse --short HEAD)" \
+                --build-arg RELEASE_TAG="ci-$(git rev-parse --short HEAD)" \
+                -t "libfaketime:$tag" .
+
+              info="$(docker run --rm "libfaketime:$tag" sh -c 'cat /etc/debian_version; getconf GNU_LIBC_VERSION | cut -d" " -f2')"
+              point="$(printf '%s\n' "$info" | sed -n 1p)"
+              actual_glibc="$(printf '%s\n' "$info" | sed -n 2p)"
+              if [ "$actual_glibc" != "$carrier_glibc" ]; then
+                echo "docker/bases.lock says $carrier runs glibc $carrier_glibc, image reports $actual_glibc" >&2
+                exit 1
+              fi
+              echo "baseline glibc $glibc, debian$distro -> $carrier resolved to $point (glibc $actual_glibc)"
+              if [ -z "$probe" ]; then probe="$tag"; fi
+            done < docker/bases.lock
+
+            if [ -z "$probe" ]; then
+              echo "no carrier can carry baseline glibc $glibc" >&2
+              exit 1
+            fi
+            CONTAINER_ENGINE=docker GLIBC_FLOOR="$glibc" ./test.sh "libfaketime:$probe"
+          done < docker/build-base.lock

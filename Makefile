@@ -1,5 +1,6 @@
 VERSION   ?= 0.9.13
 DISTRO    ?= 11
+GLIBC     ?= 2.31
 IMAGE     ?= arsiachou/libfaketime
 PREFIX    ?= /usr/local
 ENGINE    ?= podman
@@ -8,24 +9,25 @@ ENGINE    ?= podman
 #   with-proxy make build VERSION=0.9.10 NETWORK=host
 NETWORK   ?=
 
-# One build baseline for every artifact; one carrier image per target distro.
-BUILD_ROW    := $(shell awk -F'\t' '!/^#/ && NF {printf "%s|%s|%s", $$1, $$2, $$3}' docker/build-base.lock)
-BUILD_PARTS  := $(subst |, ,$(BUILD_ROW))
-BASE_TAG     := $(word 1,$(BUILD_PARTS))
-GLIBC        := $(word 2,$(BUILD_PARTS))
-APT_ARCHIVE  := $(word 3,$(BUILD_PARTS))
-FINAL_BASE   := $(shell awk -F'\t' -v d="$(DISTRO)" '!/^#/ && $$1 == d { print $$2 }' docker/bases.lock)
+# Baselines are keyed by glibc, so the tag always matches the compiled ABI.
+BUILD_ROW     := $(shell awk -F'\t' -v g="$(GLIBC)" '!/^#/ && $$2 == g {printf "%s|%s|%s", $$1, $$2, $$3}' docker/build-base.lock)
+BUILD_PARTS   := $(subst |, ,$(BUILD_ROW))
+BASE_TAG      := $(word 1,$(BUILD_PARTS))
+APT_ARCHIVE   := $(word 3,$(BUILD_PARTS))
+CARRIER_ROW   := $(shell awk -F'\t' -v d="$(DISTRO)" '!/^#/ && $$1 == d {printf "%s|%s", $$2, $$3}' docker/bases.lock)
+CARRIER_PARTS := $(subst |, ,$(CARRIER_ROW))
+FINAL_BASE    := $(word 1,$(CARRIER_PARTS))
+CARRIER_GLIBC := $(word 2,$(CARRIER_PARTS))
 
-# Pull the pin for this version out of docker/versions.lock so the tag, the
-# url, the hash and the compile flags can never drift apart.
+# One row supplies the tag, url, hash and flags so they cannot drift apart.
 ROW          := $(shell awk -F'\t' '!/^#/ && $$1=="$(VERSION)"{printf "%s|%s|%s", $$2, $$3, $$4}' docker/versions.lock)
 ROW_PARTS    := $(subst |, ,$(ROW))
 LIBFAKETIME_URL    := $(word 1,$(ROW_PARTS))
 LIBFAKETIME_SHA256 := $(word 2,$(ROW_PARTS))
 EXTRA_CFLAGS       := $(wordlist 3,99,$(ROW_PARTS))
 
-# Tags the distro line, not the exact point release: the point release is only
-# known after the carrier image exists, and release.yml derives it from there.
+# The point release is only known from the carrier image, so TAG stops at the
+# distro line.
 TAG ?= v$(VERSION)-glibc$(GLIBC)-debian$(DISTRO)
 
 BUILD_ARGS := \
@@ -43,10 +45,9 @@ BUILD_ARGS := \
   --build-arg VCS_REF=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
   --build-arg RELEASE_TAG=$(shell git describe --tags --exact-match 2>/dev/null || echo local)
 
-.PHONY: build test push lock clean check-pin
+.PHONY: build test push lock clean check-pin check-base
 
-# Publishing a tag that claims a version this repository did not compile is the
-# one mistake that cannot be undone, so only the publish targets are gated.
+# Never publish a tag for a version this repository did not compile.
 check-pin:
 	@case "$(LIBFAKETIME_SHA256)" in \
 	  ""|TODO*) \
@@ -54,7 +55,26 @@ check-pin:
 	    exit 1 ;; \
 	esac
 
-build:
+check-base:
+	@test -n "$(BUILD_ROW)" || { \
+	  echo "no build baseline with glibc $(GLIBC) in docker/build-base.lock" >&2; \
+	  exit 1; \
+	}
+	@test -n "$(FINAL_BASE)" || { \
+	  echo "no carrier for distro $(DISTRO) in docker/bases.lock" >&2; \
+	  exit 1; \
+	}
+	@test -n "$(CARRIER_GLIBC)" || { \
+	  echo "carrier for distro $(DISTRO) has no glibc value" >&2; \
+	  exit 1; \
+	}
+	@lowest="$$(printf '%s\n%s\n' '$(GLIBC)' '$(CARRIER_GLIBC)' | sort -V | head -1)"; \
+	if [ "$$lowest" != "$(GLIBC)" ]; then \
+	  echo "carrier debian:$(FINAL_BASE) runs glibc $(CARRIER_GLIBC), below baseline glibc $(GLIBC)" >&2; \
+	  exit 1; \
+	fi
+
+build: check-base
 	$(ENGINE) build $(BUILD_ARGS) -t $(IMAGE):$(TAG) .
 
 test: build

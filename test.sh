@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-# Two kinds of check, kept apart on purpose.
-#
-#   hard      the artifact we built is the artifact we claim: the library
-#             extracts and resolves every dependency on every target it is
-#             supposed to run on. A failure here is our bug and fails the run.
-#
-#   advisory  how the release behaves at runtime. Upstream bugs are a property
-#             of the release, not a defect of this repository, so they are
-#             reported in the summary and do not fail the run. Set STRICT=1 to
-#             make them fatal locally.
-#
-# Targets below the artifact's own ABI floor are skipped, not failed: an
-# artifact built against glibc 2.41 cannot load on 2.31, by design.
+# Hard checks (artifact integrity) fail the run; advisory checks (runtime
+# behaviour) only warn unless STRICT=1. Targets below the ABI floor are skipped.
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -21,9 +10,7 @@ IMAGE="${1:?usage: test.sh <image>}"
 # Matches INSTALL_PREFIX/lib/faketime in the Dockerfile.
 LIB_DIR="${LIB_DIR:-/usr/local/lib/faketime}"
 # Each entry is image or image=glibc_floor.
-TARGETS="${TARGETS:-debian:11-slim=2.31 debian:12-slim=2.36 debian:13-slim=2.41}"
-# ABI floor of the artifact under test. Results are only meaningful on targets
-# at or above it.
+TARGETS="${TARGETS:-debian:10-slim=2.28 debian:11-slim=2.31 debian:12-slim=2.36 debian:13-slim=2.41}"
 GLIBC_FLOOR="${GLIBC_FLOOR:-}"
 STRICT="${STRICT:-0}"
 PROBE_TIMEOUT="${PROBE_TIMEOUT:-20}"

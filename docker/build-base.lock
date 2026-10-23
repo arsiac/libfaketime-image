@@ -1,13 +1,8 @@
-# The single build baseline.
+# The build baselines.
 # Columns are tab separated:
 #   image   glibc   archived
 #
-# Every artifact in this repository is compiled here, once, whatever carrier
-# image it ends up in. The older the baseline, the wider the range of systems
-# the resulting .so can be preloaded into, so it is deliberately not bumped.
-#
-# The tag floats on purpose: "11-slim" always resolves to the newest 11.x point
-# release, which is what you want for a toolchain and libc. Pinning a point
-# release instead (11.11-slim) buys reproducibility only until upstream retires
-# that tag, after which the build fails at FROM.
+# glibc is the ABI floor the artifact is compiled against.
+# archived=1 means the release has left the live mirrors.
+10-slim	2.28	1
 11-slim	2.31	1
