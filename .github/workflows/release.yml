@@ -622,5 +622,9 @@ jobs:
           tag_name: ${{ needs.resolve.outputs.tag }}
           name: libfaketime ${{ needs.resolve.outputs.tag }}
           generate_release_notes: true
+          # The measured table is the release note, generated from the same rows
+          # that decided which tags were published.
+          body_path: dist/libfaketime-${{ needs.resolve.outputs.version }}-compatibility.md
+          append_body: true
           # A rerun replaces existing assets instead of failing.
           overwrite_files: true
