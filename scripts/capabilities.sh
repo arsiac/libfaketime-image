@@ -11,7 +11,8 @@
 #   TARGETS="debian:11-slim debian:12-slim" ./scripts/capabilities.sh <image>
 #
 # JSON_OUT writes the same rows as JSON; --gate exits non-zero when any row has
-# a deadlocked or failed check. FORMAT selects markdown (default) or table.
+# a deadlocked or failed check. --notes adds the verdict legend and the scope
+# statement. FORMAT selects markdown (default) or table.
 #
 # Verdict per row: ok, degraded (a check reports no), hang, error.
 set -uo pipefail
@@ -28,6 +29,7 @@ JSON_OUT="${JSON_OUT:-}"
 PROBE="${PROBE:-}"
 GATE=0
 RENDER=0
+NOTES=0
 
 images=()
 render_inputs=()
@@ -40,6 +42,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --gate) GATE=1; shift ;;
+    --notes) NOTES=1; shift ;;
     --render)
       RENDER=1; shift
       while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do render_inputs+=("$1"); shift; done
@@ -308,6 +311,15 @@ render() {
 
   cell() { jq -r --arg k "$2" '[.checks[] | select(.key == $k)][0].value // "-"' <<< "$1"; }
   bad_keys() { jq -r '[.checks[] | select(.state == "bad") | .key] | join(",")' <<< "$1"; }
+  expected_of() {
+    case "${KIND[$1]:-info}" in
+      offset) printf '%s +-5' "${EXPECT[$1]}" ;;
+      near) if [ "$1" = rate ]; then printf '%s +-600' "${EXPECT[$1]}"; else printf '%s +-400' "${EXPECT[$1]}"; fi ;;
+      bool) printf 'yes' ;;
+      optional) printf '86400 +-5 or n/a' ;;
+      *) printf -- '-' ;;
+    esac
+  }
 
   n="$(jq 'length' <<< "$rows")"
   for ((i = 0; i < n; i++)); do
@@ -347,6 +359,56 @@ render() {
       fi
     fi
   done
+
+  # Markdown only: one collapsible block per row, failing checks first.
+  if [ "$FORMAT" != table ]; then
+    for ((i = 0; i < n; i++)); do
+      local drow dtag dtgt darch dverdict ddiag
+      drow="$(jq -c ".[$i]" <<< "$rows")"
+      dtag="$(jq -r '.tag' <<< "$drow")"
+      dtgt="$(jq -r '.target // ""' <<< "$drow")"
+      [ -n "$dtgt" ] && dtag="$dtag ($dtgt)"
+      darch="$(jq -r '.arch' <<< "$drow")"
+      dverdict="$(jq -r '.verdict' <<< "$drow")"
+      ddiag="$(jq -r '.diagnostic // ""' <<< "$drow")"
+      printf '\n<details><summary>%s (%s): %s</summary>\n\n' "$dtag" "$darch" "$dverdict"
+      printf '| check | expected | actual | state |\n|---|---|---|---|\n'
+      # A run where every check hit the same wall is one line, not twenty.
+      if [ "$(jq -r '[.checks[].state] | unique | length' <<< "$drow")" = 1 ] &&
+         [ "$(jq -r '.checks[0].state' <<< "$drow")" != ok ]; then
+        printf '| all checks | - | %s | %s |\n' "$(jq -r '.checks[0].value' <<< "$drow")" "$(jq -r '.checks[0].state' <<< "$drow")"
+      else
+        while IFS=$'\t' read -r k v s; do
+          printf '| %s | %s | %s | %s |\n' "$k" "$(expected_of "$k")" "$v" "$s"
+        done < <(jq -r '[.checks[] | . + {rank: (if (.state == "hang" or .state == "error" or .state == "bad") then 0 elif .state == "skip" then 2 else 1 end)}] | sort_by(.rank, .key) | .[] | [.key, .value, .state] | @tsv' <<< "$drow")
+      fi
+      if [ -n "$ddiag" ]; then
+        printf '\n```\n%s\n```\n' "$ddiag"
+      fi
+      printf '\n</details>\n'
+    done
+  fi
+
+  if [ "$NOTES" = 1 ]; then
+    cat <<'EOF'
+
+### Verdict
+
+- `ok` — every check behaved as expected.
+- `degraded` — nothing hangs or fails to load, but a check reports `no`; the
+  image is still published and the `note` column names the check.
+- `hang` — a preloaded process deadlocked while starting; the image is not
+  published.
+- `error` — the library could not be loaded or an ABI floor was exceeded; the
+  image is not published.
+
+### Not covered
+
+- 32-bit `time_t` targets, musl, and statically linked programs.
+- `pthread_cond_timedwait` accuracy and timer calls applications use directly.
+- Timestamps read through raw syscalls by the tested process itself.
+EOF
+  fi
 }
 
 render "$rows_json"

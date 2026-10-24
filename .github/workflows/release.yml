@@ -608,7 +608,7 @@ jobs:
             echo
             echo "${count} of ${total} tags published"
             echo
-            ./scripts/capabilities.sh --render dist/rows-marked.json
+            ./scripts/capabilities.sh --notes --render dist/rows-marked.json
           } > "$out"
           cat "$out"
 
