@@ -29,6 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
       tag: ${{ steps.ver.outputs.tag }}
+      floor: ${{ steps.ver.outputs.floor }}
       url: ${{ steps.pin.outputs.url }}
       sha: ${{ steps.pin.outputs.sha }}
       cflags: ${{ steps.pin.outputs.cflags }}
@@ -58,13 +59,30 @@ jobs:
               exit 1
               ;;
           esac
+          # A tag ending in -glibc<A.B> scopes the release to that one baseline;
+          # a bare version tag covers every baseline in the lock file.
+          floor=""
+          case "$tag" in
+            *-glibc*)
+              floor="${tag##*-glibc}"
+              case "$floor" in
+                *[!0-9.]*|"")
+                  echo "cannot read a glibc floor out of tag '$tag'" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+          esac
           {
             echo "version=$version"
             echo "tag=$tag"
+            echo "floor=$floor"
           } >> "$GITHUB_OUTPUT"
 
       - name: Read build baselines
         id: bases
+        env:
+          FLOOR: ${{ steps.ver.outputs.floor }}
         run: |
           list="["
           while IFS=$'\t' read -r image glibc archived make_mode; do
@@ -79,11 +97,18 @@ jobs:
               echo "baseline $image has no make value" >&2
               exit 1
             fi
+            if [ -n "$FLOOR" ] && [ "$glibc" != "$FLOOR" ]; then
+              continue
+            fi
             list="$list{\"image\":\"$image\",\"glibc\":\"$glibc\",\"archived\":\"$archived\",\"make\":\"$make_mode\"},"
           done < docker/build-base.lock
           list="${list%,}]"
           if [ "$list" = "[]" ]; then
-            echo "docker/build-base.lock has no baselines" >&2
+            if [ -n "$FLOOR" ]; then
+              echo "no baseline with glibc $FLOOR in docker/build-base.lock" >&2
+            else
+              echo "docker/build-base.lock has no baselines" >&2
+            fi
             exit 1
           fi
           echo "list=$list" >> "$GITHUB_OUTPUT"
@@ -577,8 +602,10 @@ jobs:
       # The report is rebuilt from the measured rows, so the published decision
       # and the table come from the same data.
       - name: Assemble the compatibility table
+        id: report
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
+          FLOOR: ${{ needs.resolve.outputs.floor }}
         run: |
           set -eux
           mkdir -p dist
@@ -602,9 +629,14 @@ jobs:
             | map(. as $row | . + {pushed: (if ($p | index($row.tag)) then "yes" else "no" end)})
           ' dist/rows.json | jq 'sort_by(.tag, .arch)' > dist/rows-marked.json
 
-          out="dist/libfaketime-${VERSION}-compatibility.md"
+          # The file name carries the floor so a release never shares a name with
+          # a sibling floor.
+          suffix=""
+          if [ -n "${FLOOR:-}" ]; then suffix="-glibc$FLOOR"; fi
+          out="dist/libfaketime-${VERSION}${suffix}-compatibility.md"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
           {
-            echo "## Compatibility: libfaketime ${VERSION}"
+            echo "## Compatibility: libfaketime ${VERSION} (glibc ${FLOOR:-all})"
             echo
             echo "${count} of ${total} tags published"
             echo
@@ -624,7 +656,7 @@ jobs:
           generate_release_notes: true
           # The measured table is the release note, generated from the same rows
           # that decided which tags were published.
-          body_path: dist/libfaketime-${{ needs.resolve.outputs.version }}-compatibility.md
+          body_path: ${{ steps.report.outputs.path }}
           append_body: true
           # A rerun replaces existing assets instead of failing.
           overwrite_files: true
