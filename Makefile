@@ -11,16 +11,18 @@ NETWORK   ?=
 # Stretch-era baselines are gone from deb.debian.org; a domestic mirror shortens
 # the fetch without changing which packages are installed.
 APT_MIRROR ?= archive.debian.org
+# A mirror override for the CentOS vault; only archived=1 baselines read it.
+YUM_MIRROR ?= https://vault.centos.org
 
 # Baselines are keyed by glibc, so the tag always matches the compiled ABI.
 BUILD_ROW     := $(shell awk -F'\t' -v g="$(GLIBC)" '!/^#/ && $$2 == g {printf "%s|%s|%s|%s", $$1, $$2, $$3, $$4}' docker/build-base.lock)
 BUILD_PARTS   := $(subst |, ,$(BUILD_ROW))
-BASE_TAG      := $(word 1,$(BUILD_PARTS))
-APT_ARCHIVE   := $(word 3,$(BUILD_PARTS))
+BASE_IMAGE    := $(word 1,$(BUILD_PARTS))
+ARCHIVED      := $(word 3,$(BUILD_PARTS))
 MAKE_MODE     := $(word 4,$(BUILD_PARTS))
 CARRIER_ROW   := $(shell awk -F'\t' -v d="$(DISTRO)" '!/^#/ && $$1 == d {printf "%s|%s", $$2, $$3}' docker/bases.lock)
 CARRIER_PARTS := $(subst |, ,$(CARRIER_ROW))
-FINAL_BASE    := $(word 1,$(CARRIER_PARTS))
+FINAL_IMAGE   := $(word 1,$(CARRIER_PARTS))
 CARRIER_GLIBC := $(word 2,$(CARRIER_PARTS))
 
 # One row supplies the tag, url and hash so they cannot drift apart.
@@ -40,12 +42,13 @@ TAG ?= v$(VERSION)-glibc$(GLIBC)-debian$(DISTRO)
 
 BUILD_ARGS := \
   $(if $(NETWORK),--network=$(NETWORK)) \
-  --build-arg BASE_TAG=$(BASE_TAG) \
+  --build-arg BASE_IMAGE=$(BASE_IMAGE) \
   --build-arg GLIBC=$(GLIBC) \
-  --build-arg APT_ARCHIVE=$(APT_ARCHIVE) \
+  --build-arg ARCHIVED=$(ARCHIVED) \
   --build-arg APT_MIRROR=$(APT_MIRROR) \
+  --build-arg YUM_MIRROR=$(YUM_MIRROR) \
   --build-arg TOOLCHAIN_MAKE=$(MAKE_MODE) \
-  --build-arg FINAL_BASE=$(FINAL_BASE) \
+  --build-arg FINAL_IMAGE=$(FINAL_IMAGE) \
   --build-arg LIBFAKETIME_VERSION=$(VERSION) \
   --build-arg LIBFAKETIME_URL=$(LIBFAKETIME_URL) \
   --build-arg LIBFAKETIME_SHA256=$(LIBFAKETIME_SHA256) \
@@ -74,7 +77,7 @@ check-base:
 	  echo "build baseline glibc $(GLIBC) has no make value" >&2; \
 	  exit 1; \
 	}
-	@test -n "$(FINAL_BASE)" || { \
+	@test -n "$(FINAL_IMAGE)" || { \
 	  echo "no carrier for distro $(DISTRO) in docker/bases.lock" >&2; \
 	  exit 1; \
 	}
@@ -84,7 +87,7 @@ check-base:
 	}
 	@lowest="$$(printf '%s\n%s\n' '$(GLIBC)' '$(CARRIER_GLIBC)' | sort -V | head -1)"; \
 	if [ "$$lowest" != "$(GLIBC)" ]; then \
-	  echo "carrier debian:$(FINAL_BASE) runs glibc $(CARRIER_GLIBC), below baseline glibc $(GLIBC)" >&2; \
+	  echo "carrier $(FINAL_IMAGE) runs glibc $(CARRIER_GLIBC), below baseline glibc $(GLIBC)" >&2; \
 	  exit 1; \
 	fi
 
@@ -98,7 +101,8 @@ build: check-base check-flags
 	$(ENGINE) build $(BUILD_ARGS) -t $(IMAGE):$(TAG) .
 
 test: build
-	CONTAINER_ENGINE=$(ENGINE) GLIBC_FLOOR=$(GLIBC) ./scripts/capabilities.sh --gate $(IMAGE):$(TAG)
+	CONTAINER_ENGINE=$(ENGINE) GLIBC_FLOOR=$(GLIBC) YUM_MIRROR=$(YUM_MIRROR) \
+	  ./scripts/capabilities.sh --gate $(IMAGE):$(TAG)
 
 push: check-pin build
 	$(ENGINE) push $(IMAGE):$(TAG)

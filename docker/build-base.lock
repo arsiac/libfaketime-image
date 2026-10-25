@@ -2,9 +2,11 @@
 # Columns are tab separated:
 #   image   glibc   archived   make
 #
+# image is the full base reference, so a baseline need not be a Debian release.
 # glibc is the ABI floor the artifact is compiled against.
 # archived=1 means the release has left the live mirrors.
 # make is "system" or the version to build from source.
-9-slim	2.24	1	4.4.1
-10-slim	2.28	1	4.4.1
-11-slim	2.31	1	system
+centos:7.9.2009	2.17	1	4.4.1
+debian:9-slim	2.24	1	4.4.1
+debian:10-slim	2.28	1	4.4.1
+debian:11-slim	2.31	1	system

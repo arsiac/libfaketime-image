@@ -2,50 +2,68 @@
 
 # One artifact per baseline in docker/build-base.lock, copied into every
 # compatible carrier in docker/bases.lock.
-ARG BASE_TAG=11-slim
+ARG BASE_IMAGE=debian:11-slim
 ARG GLIBC=2.31
-ARG APT_ARCHIVE=1
+ARG ARCHIVED=1
 ARG APT_MIRROR=archive.debian.org
-ARG FINAL_BASE=11-slim
+ARG YUM_MIRROR=https://vault.centos.org
+ARG FINAL_IMAGE=debian:11-slim
 ARG TOOLCHAIN_MAKE=system
 
 # Depends only on the baseline, so BuildKit reuses it across its carriers.
-FROM debian:${BASE_TAG} AS toolchain
+FROM ${BASE_IMAGE} AS toolchain
 
 # ARGs declared before the first FROM are not visible in stages; the ones the
 # RUN uses are re-declared here.
-ARG APT_ARCHIVE
+ARG ARCHIVED
 ARG APT_MIRROR
+ARG YUM_MIRROR
 ARG GLIBC
 ARG TOOLCHAIN_MAKE
 ARG MAKE_VERSION=4.4.1
 ARG MAKE_SHA256=dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3
 
-# For archived releases: switch sources to archive.debian.org, drop
-# -updates/-backports (not always archived), and allow the unsigned archive.
-# The published glibc is asserted against the toolchain.
+# For archived releases: Debian switches to archive.debian.org with signature
+# checks relaxed and -updates/-backports dropped; CentOS is read from the vault,
+# whose paths carry the point release instead of $releasever (/centos on amd64,
+# /altarch elsewhere). The published glibc is asserted against the toolchain.
 RUN set -eux; \
     libc="$(getconf GNU_LIBC_VERSION | awk '{print $2}')"; \
     if [ "$libc" != "${GLIBC}" ]; then \
       echo "toolchain reports glibc $libc, docker/build-base.lock says ${GLIBC}" >&2; \
       exit 1; \
     fi; \
-    if [ "${APT_ARCHIVE}" = "1" ]; then \
-      sed -i \
-        -e "s|deb.debian.org/debian|${APT_MIRROR}/debian|g" \
-        -e "s|security.debian.org/debian-security|${APT_MIRROR}/debian-security|g" \
-        -e '/-updates/d' \
-        -e '/-backports/d' \
-        /etc/apt/sources.list; \
-      apt-get -o Acquire::Check-Valid-Until=false \
-              -o Acquire::AllowInsecureRepositories=true update; \
-      apt-get install -y --allow-unauthenticated --no-install-recommends \
-              build-essential ca-certificates curl patch; \
+    if command -v apt-get > /dev/null; then \
+      if [ "${ARCHIVED}" = "1" ]; then \
+        sed -i \
+          -e "s|deb.debian.org/debian|${APT_MIRROR}/debian|g" \
+          -e "s|security.debian.org/debian-security|${APT_MIRROR}/debian-security|g" \
+          -e '/-updates/d' \
+          -e '/-backports/d' \
+          /etc/apt/sources.list; \
+        apt-get -o Acquire::Check-Valid-Until=false \
+                -o Acquire::AllowInsecureRepositories=true update; \
+        apt-get install -y --allow-unauthenticated --no-install-recommends \
+                build-essential ca-certificates curl patch; \
+      else \
+        apt-get update; \
+        apt-get install -y --no-install-recommends build-essential ca-certificates curl patch; \
+      fi; \
+      rm -rf /var/lib/apt/lists/*; \
     else \
-      apt-get update; \
-      apt-get install -y --no-install-recommends build-essential ca-certificates curl patch; \
-    fi; \
-    rm -rf /var/lib/apt/lists/*
+      if [ "${ARCHIVED}" = "1" ]; then \
+        point="$(sed -n 's/^CentOS Linux release \([0-9.]*\) .*/\1/p' /etc/centos-release)"; \
+        test -n "$point"; \
+        sed -i \
+          -e '/^mirrorlist=/d' \
+          -e "s|^#baseurl=http://mirror.centos.org/centos/[^/]*|baseurl=${YUM_MIRROR}/$point|" \
+          -e "s|^#baseurl=http://mirror.centos.org/altarch/[^/]*|baseurl=${YUM_MIRROR}/altarch/$point|" \
+          /etc/yum.repos.d/CentOS-Base.repo; \
+        grep -q "^baseurl=${YUM_MIRROR}/\(altarch/\)\?$point/" /etc/yum.repos.d/CentOS-Base.repo; \
+      fi; \
+      yum -y install gcc make patch ca-certificates curl; \
+      rm -rf /var/cache/yum; \
+    fi
 
 # Some baselines ship a make too old to parse libfaketime's Makefile; build the
 # pinned release with the system make and install only its binary.
@@ -127,10 +145,10 @@ RUN set -eux; \
     test -f "/stage${INSTALL_PREFIX}/lib/faketime/libfaketime.so.1"
 
 
-FROM debian:${FINAL_BASE}
+FROM ${FINAL_IMAGE}
 
-ARG BASE_TAG
-ARG FINAL_BASE
+ARG BASE_IMAGE
+ARG FINAL_IMAGE
 ARG GLIBC
 ARG LIBFAKETIME_VERSION
 ARG LIBFAKETIME_URL
@@ -142,7 +160,7 @@ ARG VCS_REF=""
 ARG RELEASE_TAG=""
 
 LABEL org.opencontainers.image.title="libfaketime" \
-      org.opencontainers.image.description="upstream libfaketime ${LIBFAKETIME_VERSION} built once on glibc ${GLIBC} and carried on debian:${FINAL_BASE}" \
+      org.opencontainers.image.description="upstream libfaketime ${LIBFAKETIME_VERSION} built once on glibc ${GLIBC} and carried on ${FINAL_IMAGE}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.licenses="GPL-2.0" \
       org.opencontainers.image.source="${LIBFAKETIME_URL}" \
@@ -151,10 +169,10 @@ LABEL org.opencontainers.image.title="libfaketime" \
       com.libfaketime.version="${LIBFAKETIME_VERSION}" \
       com.libfaketime.source.url="${LIBFAKETIME_URL}" \
       com.libfaketime.source.sha256="${LIBFAKETIME_SHA256}" \
-      com.libfaketime.build.base="debian:${BASE_TAG}" \
+      com.libfaketime.build.base="${BASE_IMAGE}" \
       com.libfaketime.build.glibc="${GLIBC}" \
       com.libfaketime.build.cflags="${EXTRA_CFLAGS}" \
-      com.libfaketime.runtime.base="debian:${FINAL_BASE}" \
+      com.libfaketime.runtime.base="${FINAL_IMAGE}" \
       com.libfaketime.install.prefix="${INSTALL_PREFIX}"
 
 # Installed tree, exactly as upstream's install target laid it down.

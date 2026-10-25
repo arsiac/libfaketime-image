@@ -66,11 +66,11 @@ jobs:
               tag="$glibc-$distro"
               cflags="$(./scripts/cflags.sh "$VERSION" "$glibc")"
               docker build \
-                --build-arg BASE_TAG="$baseline" \
+                --build-arg BASE_IMAGE="$baseline" \
                 --build-arg GLIBC="$glibc" \
-                --build-arg APT_ARCHIVE="$archived" \
+                --build-arg ARCHIVED="$archived" \
                 --build-arg TOOLCHAIN_MAKE="$make_mode" \
-                --build-arg FINAL_BASE="$carrier" \
+                --build-arg FINAL_IMAGE="$carrier" \
                 --build-arg LIBFAKETIME_VERSION="$VERSION" \
                 --build-arg LIBFAKETIME_URL="$URL" \
                 --build-arg LIBFAKETIME_SHA256="$SHA" \

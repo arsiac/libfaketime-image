@@ -1,0 +1,12 @@
+--- a/src/libfaketime.c
++++ b/src/libfaketime.c
+@@ -2109,7 +2109,8 @@
+   return result; /* will always be 0 (see manpage) */
+ }
+ 
+-int gettimeofday(struct timeval *tv, void *tz)
++struct timezone;
++int gettimeofday(struct timeval *tv, struct timezone *tz)
+ {
+   int result;
+ 

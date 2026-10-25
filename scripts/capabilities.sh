@@ -10,6 +10,9 @@
 #
 #   TARGETS="debian:11-slim debian:12-slim" ./scripts/capabilities.sh <image>
 #
+# The probe builds on the oldest baseline, so YUM_MIRROR overrides the archive
+# it is fetched from when the default is unreachable.
+#
 # JSON_OUT writes the same rows as JSON; --gate exits non-zero when any row has
 # a deadlocked or failed check. --notes adds the verdict legend and the scope
 # statement. FORMAT selects markdown (default) or table.
@@ -47,7 +50,7 @@ while [ $# -gt 0 ]; do
       RENDER=1; shift
       while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do render_inputs+=("$1"); shift; done
       ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) images+=("$1"); shift ;;
   esac
 done
@@ -111,8 +114,9 @@ build_probe() {
   archived="$(printf '%s' "$row" | cut -f3)"
   make_mode="$(printf '%s' "$row" | cut -f4)"
   "$ENGINE" build --target toolchain \
-    --build-arg BASE_TAG="$base" --build-arg GLIBC="$glibc" \
-    --build-arg APT_ARCHIVE="$archived" --build-arg TOOLCHAIN_MAKE="$make_mode" \
+    --build-arg BASE_IMAGE="$base" --build-arg GLIBC="$glibc" \
+    --build-arg ARCHIVED="$archived" --build-arg TOOLCHAIN_MAKE="$make_mode" \
+    ${YUM_MIRROR:+--build-arg "YUM_MIRROR=$YUM_MIRROR"} \
     -t "lf-probe-toolchain:$glibc" . >&2 || return 1
   # The probe runs inside every carrier, so it is built against the oldest
   # baseline. It must stay dynamically linked: a static binary ignores
