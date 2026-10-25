@@ -23,12 +23,16 @@ CARRIER_PARTS := $(subst |, ,$(CARRIER_ROW))
 FINAL_BASE    := $(word 1,$(CARRIER_PARTS))
 CARRIER_GLIBC := $(word 2,$(CARRIER_PARTS))
 
-# One row supplies the tag, url, hash and flags so they cannot drift apart.
-ROW          := $(shell awk -F'\t' '!/^#/ && $$1=="$(VERSION)"{printf "%s|%s|%s", $$2, $$3, $$4}' docker/versions.lock)
+# One row supplies the tag, url and hash so they cannot drift apart.
+ROW          := $(shell awk -F'\t' '!/^#/ && $$1=="$(VERSION)"{printf "%s|%s", $$2, $$3}' docker/versions.lock)
 ROW_PARTS    := $(subst |, ,$(ROW))
 LIBFAKETIME_URL    := $(word 1,$(ROW_PARTS))
 LIBFAKETIME_SHA256 := $(word 2,$(ROW_PARTS))
-EXTRA_CFLAGS       := $(wordlist 3,99,$(ROW_PARTS))
+
+# A baseline ships the compiler that judges the warnings, so the flags a release
+# needs are per baseline; an absent file means the release needs none there.
+CFLAGS_FILE  := docker/cflags/$(VERSION)/$(GLIBC).flags
+EXTRA_CFLAGS := $(shell ./scripts/cflags.sh $(VERSION) $(GLIBC))
 
 # The point release is only known from the carrier image, so TAG stops at the
 # distro line.
@@ -51,7 +55,7 @@ BUILD_ARGS := \
   --build-arg VCS_REF=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) \
   --build-arg RELEASE_TAG=$(shell git describe --tags --exact-match 2>/dev/null || echo local)
 
-.PHONY: build test push lock clean check-pin check-base
+.PHONY: build test push lock clean check-pin check-base check-flags
 
 # Never publish a tag for a version this repository did not compile.
 check-pin:
@@ -84,7 +88,13 @@ check-base:
 	  exit 1; \
 	fi
 
-build: check-base
+# An overlay naming a release or a baseline that no longer exists would silently
+# stop applying; refuse it instead.
+check-flags:
+	@./scripts/cflags.sh --check
+
+build: check-base check-flags
+	@echo "extra flags: $(if $(wildcard $(CFLAGS_FILE)),$(CFLAGS_FILE),none)"
 	$(ENGINE) build $(BUILD_ARGS) -t $(IMAGE):$(TAG) .
 
 test: build

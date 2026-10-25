@@ -32,7 +32,6 @@ jobs:
       floor: ${{ steps.ver.outputs.floor }}
       url: ${{ steps.pin.outputs.url }}
       sha: ${{ steps.pin.outputs.sha }}
-      cflags: ${{ steps.pin.outputs.cflags }}
       pairs: ${{ steps.pairs.outputs.list }}
     steps:
       - uses: actions/checkout@v5
@@ -195,7 +194,6 @@ jobs:
           {
             echo "url=$(printf '%s' "$row" | cut -f2)"
             echo "sha=$sha"
-            echo "cflags=$(printf '%s' "$row" | cut -f4)"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -225,7 +223,6 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           URL: ${{ needs.resolve.outputs.url }}
           SHA: ${{ needs.resolve.outputs.sha }}
-          CFLAGS_EXTRA: ${{ needs.resolve.outputs.cflags }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           PAIRS: ${{ needs.resolve.outputs.pairs }}
           ARCH: ${{ matrix.arch }}
@@ -245,6 +242,7 @@ jobs:
           built=0
           while read -r pair; do
             glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
+            cflags="$(./scripts/cflags.sh "$VERSION" "$glibc")"
             baseline="$(printf '%s' "$pair" | jq -r '.baseline')"
             archived="$(printf '%s' "$pair" | jq -r '.archived')"
             make_mode="$(printf '%s' "$pair" | jq -r '.make')"
@@ -276,7 +274,7 @@ jobs:
               --build-arg "LIBFAKETIME_VERSION=$VERSION"
               --build-arg "LIBFAKETIME_URL=$URL"
               --build-arg "LIBFAKETIME_SHA256=$SHA"
-              --build-arg "EXTRA_CFLAGS=$CFLAGS_EXTRA"
+              --build-arg "EXTRA_CFLAGS=$cflags"
               --build-arg "IMAGE_VERSION=$exact"
               --build-arg "VCS_REF=$(git rev-parse --short HEAD)"
               --build-arg "RELEASE_TAG=$RELEASE_TAG"
@@ -346,7 +344,6 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           URL: ${{ needs.resolve.outputs.url }}
           SHA: ${{ needs.resolve.outputs.sha }}
-          CFLAGS_EXTRA: ${{ needs.resolve.outputs.cflags }}
           RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
           PAIRS: ${{ needs.resolve.outputs.pairs }}
           ARCH: ${{ matrix.arch }}
@@ -357,6 +354,7 @@ jobs:
           : > "$status"
           while read -r pair; do
             glibc="$(printf '%s' "$pair" | jq -r '.glibc')"
+            cflags="$(./scripts/cflags.sh "$VERSION" "$glibc")"
             baseline="$(printf '%s' "$pair" | jq -r '.baseline')"
             archived="$(printf '%s' "$pair" | jq -r '.archived')"
             make_mode="$(printf '%s' "$pair" | jq -r '.make')"
@@ -398,7 +396,7 @@ jobs:
               --build-arg "LIBFAKETIME_VERSION=$VERSION"
               --build-arg "LIBFAKETIME_URL=$URL"
               --build-arg "LIBFAKETIME_SHA256=$SHA"
-              --build-arg "EXTRA_CFLAGS=$CFLAGS_EXTRA"
+              --build-arg "EXTRA_CFLAGS=$cflags"
               --build-arg "IMAGE_VERSION=$exact"
               --build-arg "VCS_REF=$(git rev-parse --short HEAD)"
               --build-arg "RELEASE_TAG=$RELEASE_TAG"

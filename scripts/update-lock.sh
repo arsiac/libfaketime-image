@@ -31,7 +31,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 pinned=0
 skipped=0
-while IFS=$'\t' read -r ver url sha _flags; do
+while IFS=$'\t' read -r ver url sha; do
   case "$ver" in ''|'#'*) continue ;; esac
   selected "$ver" || continue
   if [ "$force" -eq 0 ] && [ "${sha:0:4}" != "TODO" ]; then

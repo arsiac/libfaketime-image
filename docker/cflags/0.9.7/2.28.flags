@@ -1,0 +1,1 @@
+-Wno-error=stringop-truncation -Wno-error=cast-function-type -Wno-error=format-truncation -Wno-error=stringop-overflow

@@ -1,19 +1,21 @@
 # libfaketime releases shipped by this repository.
 # Columns are tab separated:
-#   version   url   sha256   extra_cflags
+#   version   url   sha256
 #
-# extra_cflags is appended to the flags used by src/Makefile; releases older
-# than the current GCC warning set need individual -Wno-error= entries here.
+# Extra compiler flags are per baseline, not per release, so they live in
+# docker/cflags/<version>/<glibc>.flags and this file says nothing about them:
+# a release needs them only where the baseline's GCC is strict about warnings
+# the source predates. Without a file, the build passes no extra flags.
 #
 # sha256 "TODO" means not pinned yet; the build refuses to run until
 # scripts/update-lock.sh has filled it in.
 #
 # "hangs" means every preloaded process blocks during initialisation, and only
 # on glibc 2.31.
-0.9.7	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.7.tar.gz	4d65f368b2d53ee2f93a25d5e9541ce27357f2b95e5e5afff210e0805042811e	-Wno-error=stringop-truncation -Wno-error=cast-function-type -Wno-error=format-truncation -Wno-error=stringop-overflow
-0.9.8	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.8.tar.gz	06288237cd5890eca148489e5b904ed852ed0ffa8424bfb479342f4daa8442a3	
-0.9.9	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.9.tar.gz	57d0181150361c0a9b5c8eef05b11392f6134ada2c2d998e92e63daed639647c	
-0.9.10	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.10.tar.gz	729ad33b9c750a50d9c68e97b90499680a74afd1568d859c574c0fe56fe7947f	
-0.9.11	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.11.tar.gz	5912d8b4179402058d3847c0ad389e688630ea38898847b1190e636e12c33e44	
-0.9.12	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.12.tar.gz	4fc32218697c052adcdc5ee395581f2554ca56d086ac817ced2be0d6f1f8a9fa	
-0.9.13	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.13.tar.gz	8e56deeb805682b025107e095f1d94a6ea677472f05824cd475f5c5e6e1a5ddf	
+0.9.7	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.7.tar.gz	4d65f368b2d53ee2f93a25d5e9541ce27357f2b95e5e5afff210e0805042811e
+0.9.8	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.8.tar.gz	06288237cd5890eca148489e5b904ed852ed0ffa8424bfb479342f4daa8442a3
+0.9.9	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.9.tar.gz	57d0181150361c0a9b5c8eef05b11392f6134ada2c2d998e92e63daed639647c
+0.9.10	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.10.tar.gz	729ad33b9c750a50d9c68e97b90499680a74afd1568d859c574c0fe56fe7947f
+0.9.11	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.11.tar.gz	5912d8b4179402058d3847c0ad389e688630ea38898847b1190e636e12c33e44
+0.9.12	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.12.tar.gz	4fc32218697c052adcdc5ee395581f2554ca56d086ac817ced2be0d6f1f8a9fa
+0.9.13	https://github.com/wolfcw/libfaketime/archive/refs/tags/v0.9.13.tar.gz	8e56deeb805682b025107e095f1d94a6ea677472f05824cd475f5c5e6e1a5ddf
