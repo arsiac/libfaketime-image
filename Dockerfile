@@ -5,6 +5,7 @@
 ARG BASE_TAG=11-slim
 ARG GLIBC=2.31
 ARG APT_ARCHIVE=1
+ARG APT_MIRROR=archive.debian.org
 ARG FINAL_BASE=11-slim
 ARG TOOLCHAIN_MAKE=system
 
@@ -14,6 +15,7 @@ FROM debian:${BASE_TAG} AS toolchain
 # ARGs declared before the first FROM are not visible in stages; the ones the
 # RUN uses are re-declared here.
 ARG APT_ARCHIVE
+ARG APT_MIRROR
 ARG GLIBC
 ARG TOOLCHAIN_MAKE
 ARG MAKE_VERSION=4.4.1
@@ -30,8 +32,8 @@ RUN set -eux; \
     fi; \
     if [ "${APT_ARCHIVE}" = "1" ]; then \
       sed -i \
-        -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
-        -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
+        -e "s|deb.debian.org/debian|${APT_MIRROR}/debian|g" \
+        -e "s|security.debian.org/debian-security|${APT_MIRROR}/debian-security|g" \
         -e '/-updates/d' \
         -e '/-backports/d' \
         /etc/apt/sources.list; \

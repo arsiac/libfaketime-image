@@ -8,6 +8,9 @@ ENGINE    ?= podman
 # 127.0.0.1 inside the build container is the machine running podman:
 #   with-proxy make build VERSION=0.9.10 NETWORK=host
 NETWORK   ?=
+# Stretch-era baselines are gone from deb.debian.org; a domestic mirror shortens
+# the fetch without changing which packages are installed.
+APT_MIRROR ?= archive.debian.org
 
 # Baselines are keyed by glibc, so the tag always matches the compiled ABI.
 BUILD_ROW     := $(shell awk -F'\t' -v g="$(GLIBC)" '!/^#/ && $$2 == g {printf "%s|%s|%s|%s", $$1, $$2, $$3, $$4}' docker/build-base.lock)
@@ -36,6 +39,7 @@ BUILD_ARGS := \
   --build-arg BASE_TAG=$(BASE_TAG) \
   --build-arg GLIBC=$(GLIBC) \
   --build-arg APT_ARCHIVE=$(APT_ARCHIVE) \
+  --build-arg APT_MIRROR=$(APT_MIRROR) \
   --build-arg TOOLCHAIN_MAKE=$(MAKE_MODE) \
   --build-arg FINAL_BASE=$(FINAL_BASE) \
   --build-arg LIBFAKETIME_VERSION=$(VERSION) \
